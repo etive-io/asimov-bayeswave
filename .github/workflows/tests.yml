@@ -12,7 +12,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # macOS is excluded: asimov core has a hard, unconditional dependency
+        # on the `htcondor` package (asimov/pyproject.toml), which HTCondor
+        # only ships as Linux wheels on PyPI -- `pip install asimov` (and
+        # therefore this plugin, which depends on asimov>=0.7) cannot
+        # succeed on macOS at all. This is an asimov-core packaging issue,
+        # not something fixable from this plugin.
+        os: [ubuntu-latest]
         python-version: ['3.9', '3.10', '3.11', '3.12']
 
     steps:
