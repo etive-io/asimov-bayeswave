@@ -584,7 +584,10 @@ class TestAfterCompletion:
         mock_convert_psd.assert_not_called()
         assert mock_production.status == "uploaded"
 
-    @patch("asimov_bayeswave.bayeswave.shutil.which", return_value="/usr/bin/convert_psd_ascii2xml")
+    @patch(
+        "asimov_bayeswave.bayeswave.shutil.which",
+        return_value="/usr/bin/convert_psd_ascii2xml",
+    )
     @patch("asimov_bayeswave.bayeswave.BayesWave._convert_psd")
     @patch("asimov_bayeswave.bayeswave.BayesWave.collect_pages")
     @patch("asimov_bayeswave.bayeswave.BayesWave.store_assets")
