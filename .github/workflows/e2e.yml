@@ -282,14 +282,19 @@ jobs:
       # (bayeswave, bayeswaveutils, lalinference and lalapps were all
       # checked; only BayesWaveToLALPSD, a different tool with a
       # substantially different calling convention, ships in `bayeswave`
-      # itself). This is deliberately NOT worked around: after_completion()
-      # already catches the resulting PipelineException, logs it, and
-      # continues on to store the ascii-format PSD regardless (see
-      # asimov_bayeswave/bayeswave.py). This step is the real regression
-      # check for that graceful-degradation behaviour, and for the
-      # `_convert_psd` stderr=STDOUT bug fix (previously, failure could
-      # never actually be detected at all -- see CHANGELOG.md) now
-      # correctly raising instead of silently mis-reporting success.
+      # itself). convert_psd_ascii2xml actually ships with RIFT, not
+      # BayesWave, and this plugin deliberately does not depend on RIFT, so
+      # it being absent here is an expected, routine condition rather than a
+      # failure. after_completion() now checks for it with shutil.which()
+      # upfront and skips the conversion cleanly (an info-level log, no
+      # exception) when it's missing, rather than always attempting it and
+      # relying on a try/except around the resulting PipelineException (the
+      # previous behaviour, which logged it as an error on every single
+      # completion). This step is the regression check for that graceful,
+      # by-design skip, and for the `_convert_psd` stderr=STDOUT bug fix
+      # (previously, failure could never actually be detected at all -- see
+      # CHANGELOG.md) now correctly raising instead of silently
+      # mis-reporting success on the rare host where the tool *is* present.
       - name: Verify graceful handling of the missing convert_psd_ascii2xml tool
         uses: etive-io/actions/run-asimov-command@v1
         with:
@@ -302,8 +307,8 @@ jobs:
             # only thing that ever reads it, nothing writes an asimov.log
             # there during normal operation).
             test -f logs/asimov.log || { echo "::error::No asimov.log found"; exit 1; }
-            grep -qi "Failed to convert the PSDs to XML" logs/asimov.log
-            echo "Confirmed: PSD->XML conversion failure was logged and handled gracefully, not left uncaught."
+            grep -qi "convert_psd_ascii2xml is not available" logs/asimov.log
+            echo "Confirmed: the missing convert_psd_ascii2xml tool was detected upfront and skipped cleanly, not left uncaught."
 
       - name: Verify the ascii-format PSD was stored despite the XML conversion failure
         uses: etive-io/actions/run-asimov-command@v1
