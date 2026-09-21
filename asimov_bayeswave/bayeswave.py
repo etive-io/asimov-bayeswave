@@ -330,12 +330,27 @@ class BayesWave(Pipeline):
         This includes converting PSDs to XML format, collecting output
         pages, storing assets, and applying PSD suppressions if configured.
         """
-        try:
-            for ifo, psd in self.collect_assets()["psds"].items():
-                self._convert_psd(ascii_format=psd, ifo=ifo)
-        except Exception as e:
-            self.logger.error("Failed to convert the PSDs to XML")
-            self.logger.exception(e)
+        # convert_psd_ascii2xml ships with RIFT, not BayesWave, and this
+        # plugin deliberately does not depend on RIFT -- so it may
+        # legitimately not be installed alongside BayesWave. Check
+        # availability upfront and skip cleanly when it's absent, rather
+        # than always attempting the conversion and relying on the
+        # try/except below to paper over what is then an expected, routine
+        # condition rather than a real failure. The ascii-format PSDs are
+        # unaffected either way.
+        if shutil.which("convert_psd_ascii2xml"):
+            try:
+                for ifo, psd in self.collect_assets()["psds"].items():
+                    self._convert_psd(ascii_format=psd, ifo=ifo)
+            except Exception as e:
+                self.logger.error("Failed to convert the PSDs to XML")
+                self.logger.exception(e)
+        else:
+            self.logger.info(
+                "convert_psd_ascii2xml is not available (it ships with "
+                "RIFT, not BayesWave); skipping XML-format PSD conversion. "
+                "The ascii-format PSDs are still produced and stored."
+            )
 
         try:
             self.collect_pages()

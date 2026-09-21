@@ -122,6 +122,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wheel install would not actually include it -- meaning the new `config_template`
   property would have pointed at a file that doesn't exist once truly installed. Added
   `[tool.setuptools.package-data]`, matching the sibling `asimov-lalinference` plugin
+- `after_completion()` always attempted XML PSD conversion via `convert_psd_ascii2xml`,
+  which ships with RIFT, not BayesWave -- this plugin deliberately does not depend on
+  RIFT, so the tool is routinely absent. The resulting `FileNotFoundError` ->
+  `PipelineException` was caught but logged as an `.error()` on every single completion,
+  making a normal, expected condition look like a recurring failure. `after_completion()`
+  now checks for the executable with `shutil.which()` upfront (matching the pattern
+  already used for `bayeswave_pipe` itself in `build_dag()`) and skips XML conversion
+  cleanly with an `.info()`-level log when it's absent; the ascii-format PSDs are
+  unaffected either way
 
 ## [0.1.0] - TBD
 

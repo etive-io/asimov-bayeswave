@@ -548,6 +548,73 @@ class TestConvertPsd:
             pipeline._convert_psd("/path/to/psd.dat", "H1")
 
 
+class TestAfterCompletion:
+    """Test post-completion processing, in particular that XML PSD
+    conversion is optional rather than a hard dependency.
+
+    convert_psd_ascii2xml ships with RIFT, not BayesWave -- this plugin
+    deliberately does not depend on RIFT, so the executable may genuinely
+    not be installed. after_completion() must check for it upfront and
+    skip the XML conversion step cleanly in that case, rather than treating
+    a routine, expected absence as a failure on every single completion.
+    """
+
+    @patch("asimov_bayeswave.bayeswave.shutil.which", return_value=None)
+    @patch("asimov_bayeswave.bayeswave.BayesWave._convert_psd")
+    @patch("asimov_bayeswave.bayeswave.BayesWave.collect_pages")
+    @patch("asimov_bayeswave.bayeswave.BayesWave.store_assets")
+    @patch("asimov_bayeswave.bayeswave.BayesWave.collect_assets")
+    def test_skips_xml_conversion_when_executable_missing(
+        self,
+        mock_collect_assets,
+        mock_store_assets,
+        mock_collect_pages,
+        mock_convert_psd,
+        mock_which,
+        mock_production,
+        mock_config,
+    ):
+        mock_collect_assets.return_value = {
+            "psds": {"H1": "/path/to/H1-psd.dat", "L1": "/path/to/L1-psd.dat"}
+        }
+
+        pipeline = BayesWave(mock_production)
+        pipeline.after_completion()
+
+        mock_convert_psd.assert_not_called()
+        assert mock_production.status == "uploaded"
+
+    @patch(
+        "asimov_bayeswave.bayeswave.shutil.which",
+        return_value="/usr/bin/convert_psd_ascii2xml",
+    )
+    @patch("asimov_bayeswave.bayeswave.BayesWave._convert_psd")
+    @patch("asimov_bayeswave.bayeswave.BayesWave.collect_pages")
+    @patch("asimov_bayeswave.bayeswave.BayesWave.store_assets")
+    @patch("asimov_bayeswave.bayeswave.BayesWave.collect_assets")
+    def test_converts_xml_when_executable_available(
+        self,
+        mock_collect_assets,
+        mock_store_assets,
+        mock_collect_pages,
+        mock_convert_psd,
+        mock_which,
+        mock_production,
+        mock_config,
+    ):
+        mock_collect_assets.return_value = {
+            "psds": {"H1": "/path/to/H1-psd.dat", "L1": "/path/to/L1-psd.dat"}
+        }
+
+        pipeline = BayesWave(mock_production)
+        pipeline.after_completion()
+
+        assert mock_convert_psd.call_count == 2
+        mock_convert_psd.assert_any_call(ascii_format="/path/to/H1-psd.dat", ifo="H1")
+        mock_convert_psd.assert_any_call(ascii_format="/path/to/L1-psd.dat", ifo="L1")
+        assert mock_production.status == "uploaded"
+
+
 class TestResurrect:
     """Test job resurrection."""
 
