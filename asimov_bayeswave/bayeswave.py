@@ -67,8 +67,25 @@ class BayesWave(Pipeline):
     #                   stays on (the default) -- today's PSD-only mode.
     #   --signalOnly -> noise/glitch/full off, signal on; clean stays on.
     #   --glitchOnly -> noise/signal/full off, glitch on; clean stays on.
-    #   --fullOnly   -> noise/glitch/signal off, the combined "full"
-    #                   (signal+glitch) model on; clean stays on.
+    #   --fullOnly   -> noise/glitch/signal off, only the *combined*
+    #                   "full" (signal+glitch) model runs (see
+    #                   BayesWaveIO.c:1858-1865). This is NOT what a
+    #                   coherence test needs: BayesWave.c's evidence
+    #                   fprintf()s for "signal"/"glitch"/"noise" run
+    #                   unconditionally regardless of which models were
+    #                   actually sampled (see BayesWave.c ~1157-1240), so a
+    #                   --fullOnly run's evidence.dat has real numbers only
+    #                   for "full" -- the "signal"/"glitch"/"noise" lines
+    #                   are placeholder zeros from models that never ran,
+    #                   not real per-model evidences, and there is no
+    #                   signal:glitch Bayes factor to be had.
+    #   (no flag)    -> BayesWave's own defaults (BayesWaveIO.c
+    #                   ~1638-1649): clean, noise, glitch AND signal all
+    #                   on, full off. This runs signal, glitch and noise as
+    #                   genuinely separate RJMCMC phases with real
+    #                   evidences each, which is what a coherence test
+    #                   (comparing signal/glitch/noise evidence) actually
+    #                   needs -- see the "coherence" mode below.
     # In every case the "clean" model (used for on-source PSD estimation)
     # is left at its default of "on", so PSD collection keeps working
     # exactly as it does today regardless of which other models are
@@ -78,6 +95,8 @@ class BayesWave(Pipeline):
         "signal": "signalOnly",
         "glitch": "glitchOnly",
         "full": "fullOnly",
+        # No restriction flag: BayesWave's own defaults apply.
+        "coherence": None,
     }
 
     def __init__(self, production, category=None):
@@ -285,13 +304,22 @@ class BayesWave(Pipeline):
         ----
         For a PSD-only run (the default) this only checks for the PSDs,
         exactly as before. For a run which also requests a signal and/or
-        glitch model, checking for the PSDs alone is not enough: the
-        "clean" PSD-estimation phase finishes well before the
+        glitch model (``"signal"``, ``"glitch"``, ``"full"`` or
+        ``"coherence"`` mode), checking for the PSDs alone is not enough:
+        the "clean" PSD-estimation phase finishes well before the
         signal/glitch post-processing does (they are independent models
         within the same BayesWave/BayesWavePost run), so that would report
         completion far too early. In that case this instead requires the
         reconstruction for every requested model and interferometer, plus
-        the final megaplot summary page.
+        the final megaplot summary page. For "coherence" mode this means
+        both ``post/signal/`` and ``post/glitch/`` (BayesWave's own
+        default model set writes each model to its own ``post/<model>/``
+        directory, same as "signal"-only/"glitch"-only mode); for "full"
+        mode it means the combined ``post/full/`` directory, which holds
+        both a signal- and a glitch-prefixed reconstruction file. Either
+        way, ``collect_assets()``'s reconstruction glob searches across
+        every ``post/*/`` directory so this doesn't need to special-case
+        which directory name is used.
         """
         mode = self.run_mode
 
@@ -304,9 +332,9 @@ class BayesWave(Pipeline):
                 return False
 
         required_components = []
-        if mode in ("signal", "full"):
+        if mode in ("signal", "full", "coherence"):
             required_components.append("signal")
-        if mode in ("glitch", "full"):
+        if mode in ("glitch", "full", "coherence"):
             required_components.append("glitch")
 
         assets = self.collect_assets()
@@ -530,14 +558,16 @@ class BayesWave(Pipeline):
         dict
             With keys ``signal``, ``glitch``, ``noise_psd``, ``lines``,
             ``chirplets`` and ``mode`` (one of ``"psd"``, ``"signal"``,
-            ``"glitch"`` or ``"full"``).
+            ``"glitch"``, ``"full"`` or ``"coherence"``).
 
         Raises
         ------
         PipelineException
             If an unknown value is given for ``signal``, ``glitch`` or
-            ``noise.psd``, or if a combination BayesWave cannot (yet) run
-            is requested (``signal: cbc`` or ``noise.psd: fixed``).
+            ``noise.psd``; if a combination BayesWave cannot (yet) run is
+            requested (``signal: cbc`` or ``noise.psd: fixed``); or if
+            ``coherence test: true`` is combined with ``signal: none`` or
+            ``glitch: none`` (a coherence test needs both).
 
         Note
         ----
@@ -564,8 +594,12 @@ class BayesWave(Pipeline):
             }
 
         components = dict(components or {})
-        signal = components.get("signal", "wavelets")
-        glitch = components.get("glitch", "wavelets")
+        # Unlike a coherence test (below), a bare components block does
+        # NOT default signal/glitch to "wavelets" -- e.g.
+        # components: {noise: {lines: false}} on its own must stay a
+        # PSD-only run, not silently switch to a full signal+glitch run.
+        signal = components.get("signal", "none")
+        glitch = components.get("glitch", "none")
         noise = components.get("noise", {}) or {}
         noise_psd = noise.get("psd", "fit")
         lines = noise.get("lines", True)
@@ -610,15 +644,33 @@ class BayesWave(Pipeline):
                 production=self.production.name,
             )
 
+        signal_on = signal in ("wavelets", "chirplets")
+        glitch_on = glitch in ("wavelets", "chirplets")
+
+        if coherence_test and not (signal_on and glitch_on):
+            raise PipelineException(
+                "likelihood.coherence test: true requires both a signal "
+                "and a glitch model (likelihood.components.signal and "
+                ".glitch must not be 'none').",
+                production=self.production.name,
+            )
+
         # BayesWave's --chirplets flag is a single global toggle (it adds
         # the chirplet basis to whichever models are enabled) rather than
         # an independent per-model choice, so "chirplets" for either
         # component turns it on for the run as a whole.
         chirplets = signal == "chirplets" or glitch == "chirplets"
 
-        signal_on = signal in ("wavelets", "chirplets")
-        glitch_on = glitch in ("wavelets", "chirplets")
-        if signal_on and glitch_on:
+        if coherence_test:
+            # A coherence test needs signal, glitch AND noise run as
+            # genuinely separate RJMCMC phases with real, independent
+            # evidences -- that's BayesWave's own default model set (no
+            # *Only restriction flag at all), not --fullOnly, which runs
+            # only the *combined* signal+glitch model and leaves
+            # signal/glitch/noise as unrun placeholders in evidence.dat
+            # (see _MODE_FLAG's docstring comment above).
+            mode = "coherence"
+        elif signal_on and glitch_on:
             mode = "full"
         elif signal_on:
             mode = "signal"
@@ -656,8 +708,11 @@ class BayesWave(Pipeline):
         -------
         str
             One of ``"psd"`` (today's default: on-source PSD estimation
-            only), ``"signal"``, ``"glitch"`` or ``"full"`` (signal and
-            glitch models together).
+            only), ``"signal"``, ``"glitch"``, ``"full"`` (the *combined*
+            signal+glitch model, no separate evidences) or ``"coherence"``
+            (BayesWave's own default model set: signal, glitch and noise
+            each run as genuinely separate phases, so their evidences can
+            be compared -- what ``likelihood.coherence test: true`` needs).
         """
         return self._components["mode"]
 
@@ -671,9 +726,15 @@ class BayesWave(Pipeline):
         Returns
         -------
         list of str
-            E.g. ``["cleanOnly"]`` or ``["fullOnly", "chirplets"]``.
+            E.g. ``["cleanOnly"]`` or ``["fullOnly", "chirplets"]``, or
+            ``[]`` (or ``["chirplets"]``) for :attr:`run_mode`
+            ``"coherence"``, which deliberately sets no model-restriction
+            flag at all so BayesWave's own defaults apply.
         """
-        flags = [self._MODE_FLAG[self.run_mode]]
+        flags = []
+        mode_flag = self._MODE_FLAG[self.run_mode]
+        if mode_flag is not None:
+            flags.append(mode_flag)
         if self._components["chirplets"]:
             flags.append("chirplets")
         return flags
@@ -981,16 +1042,26 @@ class BayesWave(Pipeline):
 
         outputs["reconstructions"] = reconstructions
 
-        # Bayes factors: BayesWave writes trigtime_*/evidence.dat with one
-        # "<model> <logZ> <var>" line per model it ran (verified against
-        # BayesWave.c, which fprintf()s "signal ...", "glitch ..." and
-        # "noise ..." lines -- see _parse_bayes_factors()).
-        evidence_matches = glob.glob(
-            os.path.join(self.production.rundir, "trigtime*", "evidence.dat")
-        )
+        # Bayes factors: BayesWave.c's fprintf()s of the "signal"/"glitch"/
+        # "noise" lines to trigtime_*/evidence.dat are UNCONDITIONAL --
+        # they run regardless of whether that model's RJMCMC phase actually
+        # executed (verified in BayesWave.c: each fprintf() sits *outside*
+        # its "if(data->xModelFlag) {...}" block), so a model that wasn't
+        # requested still gets a placeholder "<model> 0 0" line, not an
+        # omitted one. Only "coherence" mode (BayesWave's own default model
+        # set: no restriction flag) actually runs signal, glitch AND noise
+        # each as genuinely separate phases with real, comparable
+        # evidences -- every other mode (including "full", whose combined
+        # run only ever produces a real "full" evidence) would produce
+        # misleading zero-based Bayes factors if parsed the same way, so
+        # only compute/report them for "coherence" mode.
         bayes_factors = {}
-        if evidence_matches and os.path.exists(evidence_matches[0]):
-            bayes_factors = self._parse_bayes_factors(evidence_matches[0])
+        if self.run_mode == "coherence":
+            evidence_matches = glob.glob(
+                os.path.join(self.production.rundir, "trigtime*", "evidence.dat")
+            )
+            if evidence_matches and os.path.exists(evidence_matches[0]):
+                bayes_factors = self._parse_bayes_factors(evidence_matches[0])
 
         outputs["bayes factors"] = bayes_factors
 
@@ -1011,11 +1082,18 @@ class BayesWave(Pipeline):
         """
         Parse a BayesWave ``evidence.dat`` file into log Bayes factors.
 
+        Only meaningful for a "coherence" mode run (see
+        :attr:`collect_assets`'s docstring comment) -- BayesWave always
+        writes a ``"<model> <logZ> <var>"`` line for signal/glitch/noise
+        regardless of whether that model actually ran, so this function
+        trusts its caller to only invoke it when all of the models it will
+        compare genuinely did.
+
         Parameters
         ----------
         evidence_file : str
             Path to a ``trigtime_*/evidence.dat`` file, one
-            ``"<model> <logZ> <var>"`` line per model BayesWave ran (e.g.
+            ``"<model> <logZ> <var>"`` line per model (e.g.
             ``"signal 12.3 0.1"``, verified against BayesWave.c).
 
         Returns
