@@ -8,6 +8,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Signal and glitch reconstructions (issue #2): a production can now request BayesWave's
+  signal and/or glitch wavelet models, not just on-source PSD estimation, via the
+  pipeline-agnostic `likelihood.components` ledger term (`signal`/`glitch`:
+  `none`/`wavelets`/`chirplets`, plus `noise.psd`/`noise.lines`), and the pre-existing
+  `likelihood.coherence test` term. No `bayeswave:`-named blueprint section is introduced.
+  - New `BayesWave.run_mode` (`"psd"`/`"signal"`/`"glitch"`/`"full"`), `model_flags` and
+    `bayesline_enabled` properties drive the bundled `configs/bayeswave.ini` template, so
+    the default rendering (no `likelihood.components` given) is unchanged byte-for-byte
+    other than added comments -- verified with a regression test.
+  - `build_dag()` now validates `likelihood.components` up front and raises a clear
+    `PipelineException` for combinations BayesWave can't (yet) run (`signal: cbc`,
+    `noise.psd: fixed`) or unknown values, instead of mis-running or ignoring them.
+  - `detect_completion()` now depends on the requested run mode: unchanged for a PSD-only
+    production, but for a signal/glitch/full production it requires the reconstruction for
+    every requested model and interferometer, plus the final megaplot page, rather than
+    just the PSDs -- the PSD-producing "clean" phase finishes well before the rest of
+    post-processing does, so checking PSDs alone would report completion far too early.
+  - `collect_assets()` now also returns `"reconstructions"` (`{component: {ifo: path}}`),
+    `"bayes factors"` (log Bayes factors parsed from BayesWave's `evidence.dat`, e.g.
+    `{"signal:noise": ..., "signal:glitch": ..., "glitch:noise": ...}`) and `"skymap"`
+    (megaplot.py's `plots/skymap.png`, produced once a signal model has run) when present;
+    `"psds"`/`"xml psds"` are unchanged.
+  - New `store_reconstructions()`, called from `after_completion()`, commits reconstruction
+    files to the event repository and the Asimov store the same way `store_assets()` does
+    for PSDs; Bayes factors are merged into `production.meta` the same way PSDs already are.
+  - `html()` now also renders reconstruction plots, a log Bayes-factor table and a sky map
+    image when present in `production.meta`; unchanged for a PSD-only production.
+  - The BayesWave flag/output mapping this relies on (`--cleanOnly`/`--signalOnly`/
+    `--glitchOnly`/`--fullOnly`/`--chirplets`/`--bayesLine`, the `post/<model>/` output
+    layout, `evidence.dat`'s format and which options `bayeswave_pipe` auto-forwards from
+    `[bayeswave_options]` to `[bayeswave_post_options]`) was verified against the BayesWave
+    source (`git.ligo.org/lscsoft/bayeswave`), not guessed -- see the plugin's docstrings
+    and inline comments for the specific source locations.
 - Initial release of asimov-bayeswave plugin
 - BayesWave pipeline integration for Asimov 0.7+
 - Automatic PSD generation and collection
