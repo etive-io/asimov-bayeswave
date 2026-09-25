@@ -13,6 +13,10 @@ This package provides a plugin for Asimov 0.7+ that enables integration with the
 
 - 🔌 **Plugin Architecture**: Seamlessly integrates with Asimov via entry points
 - 📊 **PSD Generation**: Automatic power spectral density estimation and collection
+- 🌊 **Signal/glitch reconstruction**: Beyond on-source PSD estimation, `likelihood.components`
+  can request a signal-only, glitch-only, or combined signal+glitch ("full") BayesWave run,
+  collecting waveform reconstructions, log Bayes factors and (for a signal run) a sky map —
+  see "Requesting signal/glitch reconstructions" below
 - 🔄 **Format Conversion**: Converts PSDs to XML format for use with other pipelines
   (where `convert_psd_ascii2xml` is available — see "Operational notes" below)
 - 🚀 **Scheduler-agnostic**: Automated DAG generation and job submission via Asimov's
@@ -78,6 +82,78 @@ quality:
     L1: 20
 ```
 
+## Requesting signal/glitch reconstructions
+
+By default (no `likelihood.components` block) a BayesWave analysis only estimates an
+on-source PSD, exactly as before. To also (or instead) request BayesWave's signal and/or
+glitch wavelet models — for source reconstructions, a coherence test, or both — add a
+`likelihood.components` block, following asimov's pipeline-agnostic ledger vocabulary
+(nothing pipeline-specific is added to the blueprint):
+
+```yaml
+kind: analysis
+pipeline: bayeswave
+comment: Signal and glitch reconstruction with BayesWave
+likelihood:
+  sample rate: 2048
+  segment length: 8
+  minimum frequency:
+    H1: 20
+    L1: 20
+  components:
+    signal: wavelets   # none | wavelets | chirplets | cbc (cbc: not yet supported)
+    glitch: wavelets   # none | wavelets | chirplets
+    noise:
+      psd: fit         # fit | fixed (fixed: not yet supported)
+      lines: true       # BayesLine spectral-line modelling
+  coherence test: true  # implies signal: wavelets, glitch: wavelets if not given
+data:
+  channels:
+    H1: H1:GDS-CALIB_STRAIN
+    L1: L1:GDS-CALIB_STRAIN
+```
+
+`likelihood.components.signal`/`.glitch` default to `none` (unset entirely, or a bare
+`components:` block with neither key given, stays a PSD-only run — e.g.
+`components: {noise: {lines: false}}` on its own does *not* turn on signal/glitch).
+`coherence test: true` is the one thing that defaults unset `signal`/`glitch` to `wavelets`.
+This resolves to one of five run modes:
+
+| `likelihood.components` / `coherence test`         | Run mode     | BayesWave flag(s)        |
+|------------------------------------------------------|--------------|---------------------------|
+| nothing given                                         | `psd`        | `--cleanOnly` (unchanged) |
+| `signal: none`, `glitch: none` (or `components: {}`)  | `psd`        | `--cleanOnly`             |
+| `signal: wavelets`, `glitch: none`                    | `signal`     | `--signalOnly`            |
+| `signal: none`, `glitch: wavelets`                    | `glitch`     | `--glitchOnly`            |
+| `signal: wavelets`, `glitch: wavelets` (no coherence test) | `full`  | `--fullOnly`              |
+| `coherence test: true` (any components, or none)      | `coherence`  | *(no restriction flag)*   |
+
+`full` mode (`--fullOnly`) runs BayesWave's *combined* signal+glitch model: it's the right
+choice for a joint reconstruction, but BayesWave only writes a single "full" evidence for
+it, not separate signal/glitch/noise evidences — there is no `signal:glitch` Bayes factor to
+compute from a `full`-mode run. A coherence test instead needs `signal`, `glitch` **and**
+`noise` run as genuinely independent phases so their evidences can be compared; that's
+BayesWave's own default model set with no restriction flag at all, which is exactly what
+`coherence test: true` (`"coherence"` mode) requests. Because of this, `coherence test:
+true` combined with `signal: none` or `glitch: none` is rejected with a
+`PipelineException` — a coherence test needs both. On-source PSD estimation ("clean"
+model) always runs alongside whichever mode is chosen, so
+`collect_assets()["psds"]`/`["xml psds"]` keep working the same way regardless of mode.
+
+Once the production completes, `collect_assets()` additionally returns:
+
+- `"reconstructions"`: `{component: {ifo: path}}` for each of `"signal"`/`"glitch"` that was
+  requested — the median time-domain waveform reconstruction BayesWavePost produces.
+- `"bayes factors"`: log Bayes factors parsed from BayesWave's `evidence.dat`, e.g.
+  `{"signal:noise": 12.3, "signal:glitch": 6.1, "glitch:noise": 6.2}` — **only for
+  `"coherence"` mode** (BayesWave always writes placeholder `"<model> 0 0"` lines to
+  `evidence.dat` for models that didn't actually run, so this is `{}` for every other mode,
+  including `full`, rather than risk misleading zero-based Bayes factors).
+- `"skymap"`: path to `plots/skymap.png`, produced by megaplot.py once a signal model has run.
+
+`after_completion()` stores the reconstructions to the event repository and the Asimov store
+the same way it does PSDs, and merges the Bayes factors into `production.meta`.
+
 ## Usage
 
 ### Via Asimov CLI
@@ -109,6 +185,8 @@ pipeline.submit_dag()
 assets = pipeline.collect_assets()
 psds = assets["psds"]
 xml_psds = assets["xml psds"]
+reconstructions = assets["reconstructions"]  # {} unless likelihood.components requested them
+bayes_factors = assets["bayes factors"]      # {} likewise
 ```
 
 ## Requirements

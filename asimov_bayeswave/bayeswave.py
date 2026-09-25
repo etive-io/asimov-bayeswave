@@ -49,6 +49,56 @@ class BayesWave(Pipeline):
     name = "BayesWave"
     STATUS = {"wait", "stuck", "stopped", "running", "finished"}
 
+    # Vocabulary accepted for likelihood.components.signal / .glitch / and
+    # .noise.psd (asimov v0.8-preview asimov/vocabulary.yaml). "cbc" and
+    # "fixed" are recognised but not yet implemented by this plugin -- see
+    # _components() below, which raises a clear PipelineException for them
+    # rather than silently ignoring or mis-running them.
+    _VALID_SIGNAL_COMPONENTS = {"none", "wavelets", "chirplets", "cbc"}
+    _VALID_GLITCH_COMPONENTS = {"none", "wavelets", "chirplets"}
+    _VALID_NOISE_PSD = {"fit", "fixed"}
+
+    # Maps the resolved run mode (see _components()) to the BayesWave model
+    # -selection flag which restricts BayesWave/BayesWavePost to that
+    # combination of models. Verified against BayesWaveIO.c
+    # parse_command_line() (shared by both BayesWave and BayesWavePost) in
+    # the BayesWave source (git.ligo.org/lscsoft/bayeswave):
+    #   --cleanOnly  -> noise/glitch/signal/full models off, clean model
+    #                   stays on (the default) -- today's PSD-only mode.
+    #   --signalOnly -> noise/glitch/full off, signal on; clean stays on.
+    #   --glitchOnly -> noise/signal/full off, glitch on; clean stays on.
+    #   --fullOnly   -> noise/glitch/signal off, only the *combined*
+    #                   "full" (signal+glitch) model runs (see
+    #                   BayesWaveIO.c:1858-1865). This is NOT what a
+    #                   coherence test needs: BayesWave.c's evidence
+    #                   fprintf()s for "signal"/"glitch"/"noise" run
+    #                   unconditionally regardless of which models were
+    #                   actually sampled (see BayesWave.c ~1157-1240), so a
+    #                   --fullOnly run's evidence.dat has real numbers only
+    #                   for "full" -- the "signal"/"glitch"/"noise" lines
+    #                   are placeholder zeros from models that never ran,
+    #                   not real per-model evidences, and there is no
+    #                   signal:glitch Bayes factor to be had.
+    #   (no flag)    -> BayesWave's own defaults (BayesWaveIO.c
+    #                   ~1638-1649): clean, noise, glitch AND signal all
+    #                   on, full off. This runs signal, glitch and noise as
+    #                   genuinely separate RJMCMC phases with real
+    #                   evidences each, which is what a coherence test
+    #                   (comparing signal/glitch/noise evidence) actually
+    #                   needs -- see the "coherence" mode below.
+    # In every case the "clean" model (used for on-source PSD estimation)
+    # is left at its default of "on", so PSD collection keeps working
+    # exactly as it does today regardless of which other models are
+    # requested.
+    _MODE_FLAG = {
+        "psd": "cleanOnly",
+        "signal": "signalOnly",
+        "glitch": "glitchOnly",
+        "full": "fullOnly",
+        # No restriction flag: BayesWave's own defaults apply.
+        "coherence": None,
+    }
+
     def __init__(self, production, category=None):
         super(BayesWave, self).__init__(production, category)
         self.logger.info("Using the Bayeswave pipeline plugin")
@@ -95,6 +145,8 @@ class BayesWave(Pipeline):
         PipelineException
            Raised if the construction of the DAG fails.
         """
+        self._validate_components()
+
         if self.production.event.repository:
             try:
                 gps_file = self.production.get_timefile()
@@ -245,14 +297,65 @@ class BayesWave(Pipeline):
         Returns
         -------
         bool
-            True if PSDs have been generated, False otherwise.
+            True if the outputs required by this production's
+            :attr:`run_mode` have been generated, False otherwise.
+
+        Note
+        ----
+        For a PSD-only run (the default) this only checks for the PSDs,
+        exactly as before. For a run which also requests a signal and/or
+        glitch model (``"signal"``, ``"glitch"``, ``"full"`` or
+        ``"coherence"`` mode), checking for the PSDs alone is not enough:
+        the "clean" PSD-estimation phase finishes well before the
+        signal/glitch post-processing does (they are independent models
+        within the same BayesWave/BayesWavePost run), so that would report
+        completion far too early. In that case this instead requires the
+        reconstruction for every requested model and interferometer, plus
+        the final megaplot summary page. For "coherence" mode this means
+        both ``post/signal/`` and ``post/glitch/`` (BayesWave's own
+        default model set writes each model to its own ``post/<model>/``
+        directory, same as "signal"-only/"glitch"-only mode); for "full"
+        mode it means the combined ``post/full/`` directory, which holds
+        both a signal- and a glitch-prefixed reconstruction file. Either
+        way, ``collect_assets()``'s reconstruction glob searches across
+        every ``post/*/`` directory so this doesn't need to special-case
+        which directory name is used.
         """
-        psds = self.collect_assets()["psds"]
-        if len(list(psds.values())) > 0:
-            return True
-        else:
+        mode = self.run_mode
+
+        if mode == "psd":
+            psds = self.collect_assets()["psds"]
+            if len(list(psds.values())) > 0:
+                return True
+            else:
+                self.logger.info("Bayeswave job completion was not detected.")
+                return False
+
+        required_components = []
+        if mode in ("signal", "full", "coherence"):
+            required_components.append("signal")
+        if mode in ("glitch", "full", "coherence"):
+            required_components.append("glitch")
+
+        assets = self.collect_assets()
+        reconstructions = assets["reconstructions"]
+        ifos = self.production.meta["interferometers"]
+
+        for component in required_components:
+            available = reconstructions.get(component, {})
+            if not all(ifo in available for ifo in ifos):
+                self.logger.info("Bayeswave job completion was not detected.")
+                return False
+
+        # Require the final megaplot output too, so completion isn't
+        # reported while megaplot.py is still generating the summary page.
+        if not glob.glob(
+            os.path.join(self.production.rundir, "trigtime*", "index.html")
+        ):
             self.logger.info("Bayeswave job completion was not detected.")
             return False
+
+        return True
 
     def _convert_psd(self, ascii_format, ifo):
         """
@@ -369,6 +472,12 @@ class BayesWave(Pipeline):
             self.logger.error("Failed to store the PSDs")
             self.logger.exception(e)
 
+        try:
+            self.store_reconstructions()
+        except Exception as e:
+            self.logger.error("Failed to store the reconstructions")
+            self.logger.exception(e)
+
         if "supress" in self.production.meta.get("quality", {}):
             for ifo in self.production.meta["quality"]["supress"]:
                 if ifo in self.production.meta["interferometers"]:
@@ -422,6 +531,222 @@ class BayesWave(Pipeline):
                 "Please update your blueprint to include 'minimum frequency' in 'likelihood'."
             )
         return min(min_freq.values())
+
+    @property
+    def _components(self):
+        """
+        Resolve ``likelihood.components`` (and the pre-existing
+        ``likelihood.coherence test`` term) into a normalised description
+        of which BayesWave models this production should run.
+
+        This mirrors the asimov v0.8-preview ledger vocabulary (see
+        ``asimov/vocabulary.yaml``):
+
+        .. code-block:: yaml
+
+            likelihood:
+              components:
+                signal: wavelets      # none | wavelets | chirplets | cbc
+                glitch: wavelets      # none | wavelets | chirplets
+                noise:
+                  psd: fit            # fit | fixed
+                  lines: true
+              coherence test: true
+
+        Returns
+        -------
+        dict
+            With keys ``signal``, ``glitch``, ``noise_psd``, ``lines``,
+            ``chirplets`` and ``mode`` (one of ``"psd"``, ``"signal"``,
+            ``"glitch"``, ``"full"`` or ``"coherence"``).
+
+        Raises
+        ------
+        PipelineException
+            If an unknown value is given for ``signal``, ``glitch`` or
+            ``noise.psd``; if a combination BayesWave cannot (yet) run is
+            requested (``signal: cbc`` or ``noise.psd: fixed``); or if
+            ``coherence test: true`` is combined with ``signal: none`` or
+            ``glitch: none`` (a coherence test needs both).
+
+        Note
+        ----
+        Computed fresh from ``production.meta`` on every access, like
+        :attr:`flow`, for the same construction-order reasons (see
+        :attr:`flow`'s docstring) -- this must be safe to call from the
+        ini template at render time, long after ``__init__``.
+        """
+        likelihood = self.production.meta.get("likelihood", {})
+        components = likelihood.get("components")
+        coherence_test = bool(likelihood.get("coherence test", False))
+
+        if components is None and not coherence_test:
+            # Nothing was requested: this MUST render/behave exactly as it
+            # did before likelihood.components existed -- a PSD-only
+            # cleanOnly run.
+            return {
+                "signal": "none",
+                "glitch": "none",
+                "noise_psd": "fit",
+                "lines": True,
+                "chirplets": False,
+                "mode": "psd",
+            }
+
+        components = dict(components or {})
+        # Unlike a coherence test (below), a bare components block does
+        # NOT default signal/glitch to "wavelets" -- e.g.
+        # components: {noise: {lines: false}} on its own must stay a
+        # PSD-only run, not silently switch to a full signal+glitch run.
+        signal = components.get("signal", "none")
+        glitch = components.get("glitch", "none")
+        noise = components.get("noise", {}) or {}
+        noise_psd = noise.get("psd", "fit")
+        lines = noise.get("lines", True)
+
+        # coherence test implies a signal+glitch analysis (so their
+        # evidences can be compared) unless the components block already
+        # said otherwise explicitly.
+        if coherence_test:
+            if "signal" not in components:
+                signal = "wavelets"
+            if "glitch" not in components:
+                glitch = "wavelets"
+
+        if signal not in self._VALID_SIGNAL_COMPONENTS:
+            raise PipelineException(
+                f"Unknown value for likelihood.components.signal: {signal!r} "
+                f"(expected one of {sorted(self._VALID_SIGNAL_COMPONENTS)})",
+                production=self.production.name,
+            )
+        if glitch not in self._VALID_GLITCH_COMPONENTS:
+            raise PipelineException(
+                f"Unknown value for likelihood.components.glitch: {glitch!r} "
+                f"(expected one of {sorted(self._VALID_GLITCH_COMPONENTS)})",
+                production=self.production.name,
+            )
+        if noise_psd not in self._VALID_NOISE_PSD:
+            raise PipelineException(
+                f"Unknown value for likelihood.components.noise.psd: {noise_psd!r} "
+                f"(expected one of {sorted(self._VALID_NOISE_PSD)})",
+                production=self.production.name,
+            )
+        if signal == "cbc":
+            raise PipelineException(
+                "likelihood.components.signal: cbc is not yet supported by "
+                "the BayesWave plugin.",
+                production=self.production.name,
+            )
+        if noise_psd == "fixed":
+            raise PipelineException(
+                "likelihood.components.noise.psd: fixed is not yet "
+                "supported by the BayesWave plugin.",
+                production=self.production.name,
+            )
+
+        signal_on = signal in ("wavelets", "chirplets")
+        glitch_on = glitch in ("wavelets", "chirplets")
+
+        if coherence_test and not (signal_on and glitch_on):
+            raise PipelineException(
+                "likelihood.coherence test: true requires both a signal "
+                "and a glitch model (likelihood.components.signal and "
+                ".glitch must not be 'none').",
+                production=self.production.name,
+            )
+
+        # BayesWave's --chirplets flag is a single global toggle (it adds
+        # the chirplet basis to whichever models are enabled) rather than
+        # an independent per-model choice, so "chirplets" for either
+        # component turns it on for the run as a whole.
+        chirplets = signal == "chirplets" or glitch == "chirplets"
+
+        if coherence_test:
+            # A coherence test needs signal, glitch AND noise run as
+            # genuinely separate RJMCMC phases with real, independent
+            # evidences -- that's BayesWave's own default model set (no
+            # *Only restriction flag at all), not --fullOnly, which runs
+            # only the *combined* signal+glitch model and leaves
+            # signal/glitch/noise as unrun placeholders in evidence.dat
+            # (see _MODE_FLAG's docstring comment above).
+            mode = "coherence"
+        elif signal_on and glitch_on:
+            mode = "full"
+        elif signal_on:
+            mode = "signal"
+        elif glitch_on:
+            mode = "glitch"
+        else:
+            mode = "psd"
+
+        return {
+            "signal": signal,
+            "glitch": glitch,
+            "noise_psd": noise_psd,
+            "lines": bool(lines),
+            "chirplets": chirplets,
+            "mode": mode,
+        }
+
+    def _validate_components(self):
+        """
+        Validate ``likelihood.components`` for this production.
+
+        Called from :meth:`build_dag` so that an unsupported or unknown
+        combination is rejected with a clear ``PipelineException`` before
+        a DAG is built, rather than failing obscurely inside BayesWave
+        itself (or not at all).
+        """
+        self._components
+
+    @property
+    def run_mode(self):
+        """
+        The BayesWave run mode implied by ``likelihood.components``.
+
+        Returns
+        -------
+        str
+            One of ``"psd"`` (today's default: on-source PSD estimation
+            only), ``"signal"``, ``"glitch"``, ``"full"`` (the *combined*
+            signal+glitch model, no separate evidences) or ``"coherence"``
+            (BayesWave's own default model set: signal, glitch and noise
+            each run as genuinely separate phases, so their evidences can
+            be compared -- what ``likelihood.coherence test: true`` needs).
+        """
+        return self._components["mode"]
+
+    @property
+    def model_flags(self):
+        """
+        The BayesWave model-selection flags to set (as bare, value-less
+        keys) in ``[bayeswave_options]`` for this production's
+        :attr:`run_mode`.
+
+        Returns
+        -------
+        list of str
+            E.g. ``["cleanOnly"]`` or ``["fullOnly", "chirplets"]``, or
+            ``[]`` (or ``["chirplets"]``) for :attr:`run_mode`
+            ``"coherence"``, which deliberately sets no model-restriction
+            flag at all so BayesWave's own defaults apply.
+        """
+        flags = []
+        mode_flag = self._MODE_FLAG[self.run_mode]
+        if mode_flag is not None:
+            flags.append(mode_flag)
+        if self._components["chirplets"]:
+            flags.append("chirplets")
+        return flags
+
+    @property
+    def bayesline_enabled(self):
+        """
+        Whether BayesLine spectral-line modelling (``--bayesLine``) should
+        be enabled, from ``likelihood.components.noise.lines`` (default
+        ``True``, matching today's unconditional default).
+        """
+        return self._components["lines"]
 
     def before_submit(self):
         """
@@ -555,6 +880,57 @@ class BayesWave(Pipeline):
                 )
                 self.logger.exception(e)
 
+    def store_reconstructions(self):
+        """
+        Add signal/glitch/full waveform reconstructions to the event
+        repository and the Asimov store.
+
+        These are the small, text-format median reconstruction files
+        BayesWavePost produces (see :meth:`collect_assets`); they are
+        stored the same way as the PSDs, guarded per-file the same way, so
+        one failure doesn't stop the others.
+        """
+        sample_rate = self.production.meta["likelihood"]["sample rate"]
+        reconstructions = self.collect_assets()["reconstructions"]
+        for component, per_ifo in reconstructions.items():
+            for detector, asset in per_ifo.items():
+                new_name = f"{detector}-{component}-{sample_rate}-reconstruction.dat"
+
+                try:
+                    self.production.event.repository.add_file(
+                        asset,
+                        os.path.join(
+                            self.production.category,
+                            "reconstructions",
+                            component,
+                            f"{detector}-reconstruction.dat",
+                        ),
+                        commit_message=(
+                            f"Added the {component} reconstruction for {detector}."
+                        ),
+                    )
+                except Exception as e:
+                    self.logger.error(
+                        f"There was a problem committing the {component} "
+                        f"reconstruction for {detector} to the repository."
+                    )
+                    self.logger.exception(e)
+
+                try:
+                    store = Store(root=config.get("storage", "directory"))
+                    store.add_file(
+                        self.production.event.name,
+                        self.production.name,
+                        file=asset,
+                        new_name=new_name,
+                    )
+                except Exception as e:
+                    self.logger.error(
+                        f"There was a problem committing the {component} "
+                        f"reconstruction for {detector} to the store."
+                    )
+                    self.logger.exception(e)
+
     def collect_logs(self):
         """
         Collect all of the log files which have been produced by this production.
@@ -639,7 +1015,116 @@ class BayesWave(Pipeline):
 
         outputs["xml psds"] = xml_psds
 
+        # Reconstructions: BayesWavePost writes
+        # post/<model name>/<model type>_median_time_domain_waveform_<ifo>.dat
+        # for each model it post-processes (verified against
+        # BayesWavePost.c post_process_model()). For a signal-only or
+        # glitch-only run <model name> and <model type> match ("signal" or
+        # "glitch"); for a full (signal+glitch) run <model name> is always
+        # "full" but files for both "signal" and "glitch" (and "full",
+        # the combined waveform) are written inside post/full/. Search by
+        # <model type> prefix across every post/* directory so all three
+        # cases are found without needing to know run_mode here.
+        reconstructions = {}
+        for det in self.production.meta["interferometers"]:
+            for component in ("signal", "glitch", "full"):
+                matches = glob.glob(
+                    os.path.join(
+                        self.production.rundir,
+                        "trigtime*",
+                        "post",
+                        "*",
+                        f"{component}_median_time_domain_waveform_{det}.dat",
+                    )
+                )
+                if matches and os.path.exists(matches[0]):
+                    reconstructions.setdefault(component, {})[det] = matches[0]
+
+        outputs["reconstructions"] = reconstructions
+
+        # Bayes factors: BayesWave.c's fprintf()s of the "signal"/"glitch"/
+        # "noise" lines to trigtime_*/evidence.dat are UNCONDITIONAL --
+        # they run regardless of whether that model's RJMCMC phase actually
+        # executed (verified in BayesWave.c: each fprintf() sits *outside*
+        # its "if(data->xModelFlag) {...}" block), so a model that wasn't
+        # requested still gets a placeholder "<model> 0 0" line, not an
+        # omitted one. Only "coherence" mode (BayesWave's own default model
+        # set: no restriction flag) actually runs signal, glitch AND noise
+        # each as genuinely separate phases with real, comparable
+        # evidences -- every other mode (including "full", whose combined
+        # run only ever produces a real "full" evidence) would produce
+        # misleading zero-based Bayes factors if parsed the same way, so
+        # only compute/report them for "coherence" mode.
+        bayes_factors = {}
+        if self.run_mode == "coherence":
+            evidence_matches = glob.glob(
+                os.path.join(self.production.rundir, "trigtime*", "evidence.dat")
+            )
+            if evidence_matches and os.path.exists(evidence_matches[0]):
+                bayes_factors = self._parse_bayes_factors(evidence_matches[0])
+
+        outputs["bayes factors"] = bayes_factors
+
+        # Skymap: megaplot.py only produces plots/skymap.png once a signal
+        # model has been post-processed and sky-location samples exist
+        # (verified against megaplot.py's skymap_posterior(), only called
+        # when mod == 'signal').
+        skymap_matches = glob.glob(
+            os.path.join(self.production.rundir, "trigtime*", "plots", "skymap.png")
+        )
+        if skymap_matches and os.path.exists(skymap_matches[0]):
+            outputs["skymap"] = os.path.abspath(skymap_matches[0])
+
         return outputs
+
+    @staticmethod
+    def _parse_bayes_factors(evidence_file):
+        """
+        Parse a BayesWave ``evidence.dat`` file into log Bayes factors.
+
+        Only meaningful for a "coherence" mode run (see
+        :attr:`collect_assets`'s docstring comment) -- BayesWave always
+        writes a ``"<model> <logZ> <var>"`` line for signal/glitch/noise
+        regardless of whether that model actually ran, so this function
+        trusts its caller to only invoke it when all of the models it will
+        compare genuinely did.
+
+        Parameters
+        ----------
+        evidence_file : str
+            Path to a ``trigtime_*/evidence.dat`` file, one
+            ``"<model> <logZ> <var>"`` line per model (e.g.
+            ``"signal 12.3 0.1"``, verified against BayesWave.c).
+
+        Returns
+        -------
+        dict
+            Mapping of e.g. ``"signal:noise"`` to the log Bayes factor
+            ``logZ[signal] - logZ[noise]``, for every pair of models whose
+            log evidences are both present. Empty if fewer than two
+            recognised models are present.
+        """
+        log_z = {}
+        with open(evidence_file, "r") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                model = parts[0].lower()
+                try:
+                    log_z[model] = float(parts[1])
+                except ValueError:
+                    continue
+
+        bayes_factors = {}
+        pairs = [("signal", "noise"), ("signal", "glitch"), ("glitch", "noise")]
+        for numerator, denominator in pairs:
+            if numerator in log_z and denominator in log_z:
+                bayes_factors[f"{numerator}:{denominator}"] = (
+                    log_z[numerator] - log_z[denominator]
+                )
+
+        return bayes_factors
 
     def supress_psd(self, ifo, fmin, fmax):
         """
@@ -751,6 +1236,35 @@ class BayesWave(Pipeline):
                 f"""<p><a href="{pages_dir}/index.html">Full Megaplot output</a></p>"""
             )
             out += f"""<img height=200 src="{pages_dir}/plots/clean_whitened_residual_histograms.png"</src>"""
+
+            # Reconstruction plots (only present for a signal and/or glitch
+            # run -- see collect_assets()/after_completion(), which store
+            # 'reconstructions' into production.meta on completion). Uses
+            # the plot filenames megaplot.py writes into plots/ (verified
+            # against megaplot.py's plot_waveform()):
+            # "<model>_waveform_<ifo>.png".
+            reconstructions = self.production.meta.get("reconstructions", {})
+            for component in ("signal", "glitch"):
+                for ifo in reconstructions.get(component, {}):
+                    out += (
+                        f"""<img height=200 """
+                        f"""src="{pages_dir}/plots/{component}_waveform_{ifo}.png">"""
+                    )
+
+            # Bayes factor table (only present when evidence.dat could be
+            # parsed -- see _parse_bayes_factors()).
+            bayes_factors = self.production.meta.get("bayes factors", {})
+            if bayes_factors:
+                out += """<table class="asimov-bayeswave-bayes-factors">"""
+                out += "<tr><th>Model comparison</th><th>log Bayes factor</th></tr>"
+                for comparison, value in bayes_factors.items():
+                    out += f"<tr><td>{comparison}</td><td>{value:.2f}</td></tr>"
+                out += "</table>"
+
+            # Skymap (only produced by megaplot.py for a signal run -- see
+            # collect_assets()).
+            if self.production.meta.get("skymap"):
+                out += f"""<img height=200 src="{pages_dir}/plots/skymap.png">"""
 
             out += """</div>"""
 

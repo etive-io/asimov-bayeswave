@@ -6,8 +6,15 @@ from unittest.mock import MagicMock, Mock, mock_open, patch
 import numpy as np
 import pytest
 from asimov.pipeline import PipelineException
+from liquid import Liquid
 
 from asimov_bayeswave import BayesWave
+
+CONFIG_TEMPLATE = os.path.normpath(
+    os.path.join(
+        os.path.dirname(__file__), "..", "asimov_bayeswave", "configs", "bayeswave.ini"
+    )
+)
 
 
 class TestBayesWaveInit:
@@ -357,10 +364,19 @@ class TestCollectAssets:
         self, mock_glob, mock_exists, mock_production, mock_config
     ):
         """Test PSD collection."""
-        # Mock glob to return PSD files
-        mock_glob.return_value = [
-            "/tmp/test_rundir/trigtime_123/post/clean/glitch_median_PSD_forLI_H1.dat"
-        ]
+
+        # Only the PSD glob pattern should match; every other pattern this
+        # collects (reconstructions, evidence.dat, skymap) legitimately
+        # matches nothing for a PSD-only run.
+        def glob_side_effect(pattern):
+            if "glitch_median_PSD_forLI_H1.dat" in pattern:
+                return [
+                    "/tmp/test_rundir/trigtime_123/post/clean/"
+                    "glitch_median_PSD_forLI_H1.dat"
+                ]
+            return []
+
+        mock_glob.side_effect = glob_side_effect
         mock_exists.return_value = True
 
         pipeline = BayesWave(mock_production)
@@ -369,6 +385,9 @@ class TestCollectAssets:
         assert "psds" in assets
         assert "xml psds" in assets
         assert "H1" in assets["psds"]
+        assert assets["reconstructions"] == {}
+        assert assets["bayes factors"] == {}
+        assert "skymap" not in assets
 
     @patch("asimov_bayeswave.bayeswave.glob.glob")
     def test_collect_assets_no_psds(self, mock_glob, mock_production, mock_config):
@@ -703,3 +722,807 @@ def test_module_imports():
 
     assert BayesWave is not None
     assert __version__ is not None
+
+
+class TestComponentsResolution:
+    """Test resolution of likelihood.components (+ coherence test) into a
+    run mode, per the design agreed for issue #2: no likelihood.components
+    and no coherence test must resolve to exactly today's PSD-only
+    behaviour; everything else is a new, additive mode."""
+
+    def test_no_components_is_psd_only(self, mock_production, mock_config):
+        pipeline = BayesWave(mock_production)
+        assert pipeline.run_mode == "psd"
+        assert pipeline.model_flags == ["cleanOnly"]
+        assert pipeline.bayesline_enabled is True
+
+    def test_explicit_none_none_is_psd_only(self, mock_production, mock_config):
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "none",
+            "glitch": "none",
+        }
+        pipeline = BayesWave(mock_production)
+        assert pipeline.run_mode == "psd"
+        assert pipeline.model_flags == ["cleanOnly"]
+
+    def test_empty_components_block_stays_psd_only(self, mock_production, mock_config):
+        """An (otherwise empty) components block must NOT default signal
+        and glitch to 'wavelets' -- only 'coherence test: true' does that.
+        A bare `components: {}` (or e.g. components: {noise: {lines:
+        false}}) must stay a PSD-only run."""
+        mock_production.meta["likelihood"]["components"] = {}
+        pipeline = BayesWave(mock_production)
+        assert pipeline.run_mode == "psd"
+        assert pipeline.model_flags == ["cleanOnly"]
+
+    def test_components_with_only_noise_stays_psd_only(
+        self, mock_production, mock_config
+    ):
+        mock_production.meta["likelihood"]["components"] = {
+            "noise": {"lines": False},
+        }
+        pipeline = BayesWave(mock_production)
+        assert pipeline.run_mode == "psd"
+        assert pipeline.model_flags == ["cleanOnly"]
+        assert pipeline.bayesline_enabled is False
+
+    def test_signal_only(self, mock_production, mock_config):
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "wavelets",
+            "glitch": "none",
+        }
+        pipeline = BayesWave(mock_production)
+        assert pipeline.run_mode == "signal"
+        assert pipeline.model_flags == ["signalOnly"]
+
+    def test_glitch_only(self, mock_production, mock_config):
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "none",
+            "glitch": "wavelets",
+        }
+        pipeline = BayesWave(mock_production)
+        assert pipeline.run_mode == "glitch"
+        assert pipeline.model_flags == ["glitchOnly"]
+
+    def test_signal_and_glitch_is_full(self, mock_production, mock_config):
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "wavelets",
+            "glitch": "wavelets",
+        }
+        pipeline = BayesWave(mock_production)
+        assert pipeline.run_mode == "full"
+        assert pipeline.model_flags == ["fullOnly"]
+
+    def test_chirplets_flag_added(self, mock_production, mock_config):
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "chirplets",
+            "glitch": "none",
+        }
+        pipeline = BayesWave(mock_production)
+        assert pipeline.run_mode == "signal"
+        assert pipeline.model_flags == ["signalOnly", "chirplets"]
+
+    def test_coherence_test_alone_implies_coherence_mode(
+        self, mock_production, mock_config
+    ):
+        """coherence test: true with no components block at all must still
+        switch out of the PSD-only default, defaulting signal and glitch
+        to 'wavelets', and must resolve to "coherence" mode (BayesWave's
+        own default model set) -- NOT "full" (--fullOnly), which only runs
+        the combined model and gives no separate signal/glitch/noise
+        evidences to compare (see BayesWaveIO.c:1858)."""
+        mock_production.meta["likelihood"]["coherence test"] = True
+        pipeline = BayesWave(mock_production)
+        assert pipeline.run_mode == "coherence"
+        # No *Only restriction flag at all for a coherence test.
+        assert pipeline.model_flags == []
+
+    def test_coherence_test_with_explicit_matching_components(
+        self, mock_production, mock_config
+    ):
+        mock_production.meta["likelihood"]["coherence test"] = True
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "wavelets",
+            "glitch": "chirplets",
+        }
+        pipeline = BayesWave(mock_production)
+        assert pipeline.run_mode == "coherence"
+        assert pipeline.model_flags == ["chirplets"]
+
+    def test_coherence_test_with_signal_none_raises(self, mock_production, mock_config):
+        """A coherence test compares signal/glitch/noise evidence, so it
+        cannot be combined with signal: none (or glitch: none)."""
+        mock_production.meta["likelihood"]["coherence test"] = True
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "none",
+            "glitch": "wavelets",
+        }
+        pipeline = BayesWave(mock_production)
+        with pytest.raises(PipelineException, match="coherence test"):
+            pipeline.run_mode
+
+    def test_coherence_test_with_glitch_none_raises(self, mock_production, mock_config):
+        mock_production.meta["likelihood"]["coherence test"] = True
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "wavelets",
+            "glitch": "none",
+        }
+        pipeline = BayesWave(mock_production)
+        with pytest.raises(PipelineException, match="coherence test"):
+            pipeline.run_mode
+
+    def test_noise_lines_false_disables_bayesline(self, mock_production, mock_config):
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "wavelets",
+            "glitch": "wavelets",
+            "noise": {"lines": False},
+        }
+        pipeline = BayesWave(mock_production)
+        assert pipeline.bayesline_enabled is False
+
+    def test_unknown_signal_value_raises(self, mock_production, mock_config):
+        mock_production.meta["likelihood"]["components"] = {"signal": "nonsense"}
+        pipeline = BayesWave(mock_production)
+        with pytest.raises(PipelineException, match="signal"):
+            pipeline.run_mode
+
+    def test_unknown_glitch_value_raises(self, mock_production, mock_config):
+        mock_production.meta["likelihood"]["components"] = {"glitch": "nonsense"}
+        pipeline = BayesWave(mock_production)
+        with pytest.raises(PipelineException, match="glitch"):
+            pipeline.run_mode
+
+    def test_unknown_noise_psd_value_raises(self, mock_production, mock_config):
+        mock_production.meta["likelihood"]["components"] = {
+            "noise": {"psd": "nonsense"}
+        }
+        pipeline = BayesWave(mock_production)
+        with pytest.raises(PipelineException, match="noise.psd"):
+            pipeline.run_mode
+
+    def test_signal_cbc_raises_not_yet_supported(self, mock_production, mock_config):
+        mock_production.meta["likelihood"]["components"] = {"signal": "cbc"}
+        pipeline = BayesWave(mock_production)
+        with pytest.raises(PipelineException, match="not yet supported"):
+            pipeline.run_mode
+
+    def test_noise_psd_fixed_raises_not_yet_supported(
+        self, mock_production, mock_config
+    ):
+        mock_production.meta["likelihood"]["components"] = {"noise": {"psd": "fixed"}}
+        pipeline = BayesWave(mock_production)
+        with pytest.raises(PipelineException, match="not yet supported"):
+            pipeline.run_mode
+
+
+class TestBuildDagValidation:
+    """build_dag() must reject unsupported/unknown component combinations
+    before attempting to build a DAG."""
+
+    @patch("asimov_bayeswave.bayeswave.shutil.which")
+    def test_build_dag_rejects_signal_cbc(
+        self, mock_which, mock_production, mock_config
+    ):
+        mock_which.return_value = "/opt/conda/bin/bayeswave_pipe"
+        mock_production.meta["likelihood"]["components"] = {"signal": "cbc"}
+        mock_ini = MagicMock()
+        mock_ini.ini_loc = "/tmp/test.ini"
+        mock_production.get_configuration.return_value = mock_ini
+
+        pipeline = BayesWave(mock_production)
+        with pytest.raises(PipelineException, match="not yet supported"):
+            pipeline.build_dag(dryrun=True)
+
+    @patch("asimov_bayeswave.bayeswave.shutil.which")
+    def test_build_dag_rejects_fixed_psd(
+        self, mock_which, mock_production, mock_config
+    ):
+        mock_which.return_value = "/opt/conda/bin/bayeswave_pipe"
+        mock_production.meta["likelihood"]["components"] = {"noise": {"psd": "fixed"}}
+        mock_ini = MagicMock()
+        mock_ini.ini_loc = "/tmp/test.ini"
+        mock_production.get_configuration.return_value = mock_ini
+
+        pipeline = BayesWave(mock_production)
+        with pytest.raises(PipelineException, match="not yet supported"):
+            pipeline.build_dag(dryrun=True)
+
+    @patch("asimov_bayeswave.bayeswave.shutil.which")
+    def test_build_dag_rejects_coherence_test_with_signal_none(
+        self, mock_which, mock_production, mock_config
+    ):
+        mock_which.return_value = "/opt/conda/bin/bayeswave_pipe"
+        mock_production.meta["likelihood"]["coherence test"] = True
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "none",
+            "glitch": "wavelets",
+        }
+        mock_ini = MagicMock()
+        mock_ini.ini_loc = "/tmp/test.ini"
+        mock_production.get_configuration.return_value = mock_ini
+
+        pipeline = BayesWave(mock_production)
+        with pytest.raises(PipelineException, match="coherence test"):
+            pipeline.build_dag(dryrun=True)
+
+
+class TestRunModeTable:
+    """A single table-driven test documenting the full
+    (likelihood.components, coherence test) -> (run_mode, model_flags)
+    mapping agreed for issue #2, so the mapping is visible in one place."""
+
+    @pytest.mark.parametrize(
+        "components,coherence_test,expected_mode,expected_flags",
+        [
+            (None, False, "psd", ["cleanOnly"]),
+            ({}, False, "psd", ["cleanOnly"]),
+            ({"signal": "none", "glitch": "none"}, False, "psd", ["cleanOnly"]),
+            ({"noise": {"lines": False}}, False, "psd", ["cleanOnly"]),
+            (
+                {"signal": "wavelets", "glitch": "none"},
+                False,
+                "signal",
+                ["signalOnly"],
+            ),
+            (
+                {"signal": "none", "glitch": "wavelets"},
+                False,
+                "glitch",
+                ["glitchOnly"],
+            ),
+            (
+                {"signal": "wavelets", "glitch": "wavelets"},
+                False,
+                "full",
+                ["fullOnly"],
+            ),
+            (None, True, "coherence", []),
+            (
+                {"signal": "wavelets", "glitch": "chirplets"},
+                True,
+                "coherence",
+                ["chirplets"],
+            ),
+        ],
+    )
+    def test_mode_table(
+        self,
+        mock_production,
+        mock_config,
+        components,
+        coherence_test,
+        expected_mode,
+        expected_flags,
+    ):
+        if components is not None:
+            mock_production.meta["likelihood"]["components"] = components
+        mock_production.meta["likelihood"]["coherence test"] = coherence_test
+
+        pipeline = BayesWave(mock_production)
+
+        assert pipeline.run_mode == expected_mode
+        assert pipeline.model_flags == expected_flags
+
+
+class TestTemplateRendering:
+    """Render the bundled Liquid ini template the way asimov's
+    Analysis.make_config() does (production=, pipeline=, config=), and
+    check the rendered [bayeswave_options]/[bayeswave_post_options]
+    sections for each components combination."""
+
+    def _render(self, mock_production, mock_config):
+        pipeline = BayesWave(mock_production)
+        template = Liquid(CONFIG_TEMPLATE)
+        rendered = template.render(
+            production=mock_production,
+            pipeline=pipeline,
+            config=mock_config,
+        )
+        options = rendered[
+            rendered.index("[bayeswave_options]") : rendered.index(
+                "[bayeswave_post_options]"
+            )
+        ]
+        post_options = rendered[
+            rendered.index("[bayeswave_post_options]") : rendered.index("[condor]")
+        ]
+        return options, post_options
+
+    def test_default_renders_cleanonly_psd_run(self, mock_production, mock_config):
+        """Regression test: with no likelihood.components at all, the
+        rendered ini must contain exactly the same options it always has
+        -- cleanOnly and bayesLine in both sections, nothing else new."""
+        options, post_options = self._render(mock_production, mock_config)
+
+        assert "cleanOnly=" in options
+        assert "signalOnly" not in options
+        assert "glitchOnly" not in options
+        assert "fullOnly" not in options
+        assert "chirplets" not in options
+        assert "bayesLine =" in options
+        assert "0noise=" in post_options
+        assert "lite =" in post_options
+        assert "bayesLine =" in post_options
+
+    def test_full_mode_renders_fullonly(self, mock_production, mock_config):
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "wavelets",
+            "glitch": "wavelets",
+        }
+        options, post_options = self._render(mock_production, mock_config)
+
+        assert "fullOnly=" in options
+        assert "cleanOnly" not in options
+        # --0noise/--lite are safe (and correct) for every run mode -- see
+        # BayesWave.model_flags/bayesline_enabled docstrings.
+        assert "0noise=" in post_options
+        assert "lite =" in post_options
+
+    def test_coherence_mode_renders_no_restriction_flag(
+        self, mock_production, mock_config
+    ):
+        """coherence test: true must render NO cleanOnly/signalOnly/
+        glitchOnly/fullOnly flag at all -- BayesWave's own defaults (all
+        of clean/noise/glitch/signal on) are what a coherence test needs."""
+        mock_production.meta["likelihood"]["coherence test"] = True
+        options, post_options = self._render(mock_production, mock_config)
+
+        for flag in ("cleanOnly", "signalOnly", "glitchOnly", "fullOnly"):
+            assert flag not in options
+        assert "bayesLine =" in options
+        assert "0noise=" in post_options
+        assert "lite =" in post_options
+
+    def test_signal_only_mode_renders_signalonly(self, mock_production, mock_config):
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "wavelets",
+            "glitch": "none",
+        }
+        options, _ = self._render(mock_production, mock_config)
+        assert "signalOnly=" in options
+        assert "glitchOnly" not in options
+
+    def test_glitch_only_mode_renders_glitchonly(self, mock_production, mock_config):
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "none",
+            "glitch": "wavelets",
+        }
+        options, _ = self._render(mock_production, mock_config)
+        assert "glitchOnly=" in options
+        assert "signalOnly" not in options
+
+    def test_chirplets_rendered(self, mock_production, mock_config):
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "chirplets",
+            "glitch": "none",
+        }
+        options, _ = self._render(mock_production, mock_config)
+        assert "signalOnly=" in options
+        assert "chirplets=" in options
+
+    def test_lines_false_omits_bayesline(self, mock_production, mock_config):
+        mock_production.meta["likelihood"]["components"] = {
+            "noise": {"lines": False},
+        }
+        options, post_options = self._render(mock_production, mock_config)
+        assert "bayesLine" not in options
+        assert "bayesLine" not in post_options
+
+    def test_kwargs_rendered_as_extra_options(self, mock_production, mock_config):
+        mock_production.meta["likelihood"]["kwargs"] = {
+            "waveletFrac": "0.5",
+        }
+        options, _ = self._render(mock_production, mock_config)
+        assert "waveletFrac = 0.5" in options
+
+
+class TestDetectCompletionModes:
+    """Test that completion detection is correct per run mode, including
+    the early-completion regression the "clean phase finishes first"
+    behaviour would otherwise cause."""
+
+    def test_psd_mode_uses_psds_only(self, mock_production, mock_config):
+        pipeline = BayesWave(mock_production)
+        with patch.object(
+            BayesWave, "collect_assets", return_value={"psds": {"H1": "/x.dat"}}
+        ):
+            assert pipeline.detect_completion() is True
+
+    def test_full_mode_not_complete_when_only_clean_has_finished(
+        self, mock_production, mock_config
+    ):
+        """Regression test: in a signal+glitch run, the "clean"
+        PSD-estimation phase finishes well before the rest of
+        post-processing does. If detect_completion() looked only at PSDs
+        (as it always has), it would report completion far too early."""
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "wavelets",
+            "glitch": "wavelets",
+        }
+        pipeline = BayesWave(mock_production)
+
+        # Only the clean-phase PSDs exist so far -- the signal/glitch
+        # reconstructions (and the final megaplot page) have not been
+        # produced yet.
+        with patch.object(
+            BayesWave,
+            "collect_assets",
+            return_value={
+                "psds": {"H1": "/x.dat", "L1": "/y.dat"},
+                "reconstructions": {},
+                "bayes factors": {},
+            },
+        ):
+            assert pipeline.detect_completion() is False
+
+    def test_full_mode_complete_when_all_reconstructions_and_megaplot_exist(
+        self, mock_production, mock_config
+    ):
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "wavelets",
+            "glitch": "wavelets",
+        }
+        pipeline = BayesWave(mock_production)
+
+        with (
+            patch.object(
+                BayesWave,
+                "collect_assets",
+                return_value={
+                    "psds": {"H1": "/x.dat", "L1": "/y.dat"},
+                    "reconstructions": {
+                        "signal": {"H1": "/s_h1.dat", "L1": "/s_l1.dat"},
+                        "glitch": {"H1": "/g_h1.dat", "L1": "/g_l1.dat"},
+                    },
+                    "bayes factors": {"signal:noise": 12.3},
+                },
+            ),
+            patch(
+                "asimov_bayeswave.bayeswave.glob.glob",
+                return_value=["/tmp/test_rundir/trigtime_123/index.html"],
+            ),
+        ):
+            assert pipeline.detect_completion() is True
+
+    def test_full_mode_not_complete_without_megaplot_page(
+        self, mock_production, mock_config
+    ):
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "wavelets",
+            "glitch": "wavelets",
+        }
+        pipeline = BayesWave(mock_production)
+
+        with (
+            patch.object(
+                BayesWave,
+                "collect_assets",
+                return_value={
+                    "psds": {"H1": "/x.dat", "L1": "/y.dat"},
+                    "reconstructions": {
+                        "signal": {"H1": "/s_h1.dat", "L1": "/s_l1.dat"},
+                        "glitch": {"H1": "/g_h1.dat", "L1": "/g_l1.dat"},
+                    },
+                    "bayes factors": {},
+                },
+            ),
+            patch("asimov_bayeswave.bayeswave.glob.glob", return_value=[]),
+        ):
+            assert pipeline.detect_completion() is False
+
+    def test_signal_only_mode_ignores_missing_glitch_reconstruction(
+        self, mock_production, mock_config
+    ):
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "wavelets",
+            "glitch": "none",
+        }
+        pipeline = BayesWave(mock_production)
+
+        with (
+            patch.object(
+                BayesWave,
+                "collect_assets",
+                return_value={
+                    "psds": {},
+                    "reconstructions": {
+                        "signal": {"H1": "/s_h1.dat", "L1": "/s_l1.dat"},
+                    },
+                    "bayes factors": {},
+                },
+            ),
+            patch(
+                "asimov_bayeswave.bayeswave.glob.glob",
+                return_value=["/tmp/test_rundir/trigtime_123/index.html"],
+            ),
+        ):
+            assert pipeline.detect_completion() is True
+
+    def test_coherence_mode_requires_signal_and_glitch(
+        self, mock_production, mock_config
+    ):
+        mock_production.meta["likelihood"]["coherence test"] = True
+        pipeline = BayesWave(mock_production)
+
+        with (
+            patch.object(
+                BayesWave,
+                "collect_assets",
+                return_value={
+                    "psds": {"H1": "/x.dat", "L1": "/y.dat"},
+                    "reconstructions": {
+                        "signal": {"H1": "/s_h1.dat", "L1": "/s_l1.dat"},
+                        "glitch": {"H1": "/g_h1.dat", "L1": "/g_l1.dat"},
+                    },
+                    "bayes factors": {
+                        "signal:noise": 12.3,
+                        "signal:glitch": 6.1,
+                        "glitch:noise": 6.2,
+                    },
+                },
+            ),
+            patch(
+                "asimov_bayeswave.bayeswave.glob.glob",
+                return_value=["/tmp/test_rundir/trigtime_123/index.html"],
+            ),
+        ):
+            assert pipeline.detect_completion() is True
+
+    def test_coherence_mode_not_complete_with_only_signal_reconstruction(
+        self, mock_production, mock_config
+    ):
+        mock_production.meta["likelihood"]["coherence test"] = True
+        pipeline = BayesWave(mock_production)
+
+        with (
+            patch.object(
+                BayesWave,
+                "collect_assets",
+                return_value={
+                    "psds": {"H1": "/x.dat", "L1": "/y.dat"},
+                    "reconstructions": {
+                        "signal": {"H1": "/s_h1.dat", "L1": "/s_l1.dat"},
+                    },
+                    "bayes factors": {},
+                },
+            ),
+            patch(
+                "asimov_bayeswave.bayeswave.glob.glob",
+                return_value=["/tmp/test_rundir/trigtime_123/index.html"],
+            ),
+        ):
+            assert pipeline.detect_completion() is False
+
+
+class TestCollectAssetsExtended:
+    """Test collect_assets() against real (fake) trigtime_*/post/{clean,
+    signal,glitch,full}/ trees, plus evidence.dat and a skymap, rather than
+    mocking glob."""
+
+    def _make_run_tree(self, tmp_path, mock_production, mode="full"):
+        mock_production.rundir = str(tmp_path)
+        trigdir = tmp_path / "trigtime_123.000000000_H1L1"
+        trigdir.mkdir()
+
+        clean_dir = trigdir / "post" / "clean"
+        clean_dir.mkdir(parents=True)
+        for det in ("H1", "L1"):
+            (clean_dir / f"glitch_median_PSD_forLI_{det}.dat").write_text("1 2\n")
+
+        if mode in ("signal", "full", "coherence"):
+            signal_dir = trigdir / "post" / ("full" if mode == "full" else "signal")
+            signal_dir.mkdir(parents=True, exist_ok=True)
+            for det in ("H1", "L1"):
+                (
+                    signal_dir / f"signal_median_time_domain_waveform_{det}.dat"
+                ).write_text("0.0 1.0\n")
+
+        if mode in ("glitch", "full", "coherence"):
+            glitch_dir = trigdir / "post" / ("full" if mode == "full" else "glitch")
+            glitch_dir.mkdir(parents=True, exist_ok=True)
+            for det in ("H1", "L1"):
+                (
+                    glitch_dir / f"glitch_median_time_domain_waveform_{det}.dat"
+                ).write_text("0.0 0.5\n")
+
+        (trigdir / "evidence.dat").write_text(
+            "signal 12.5 0.2\nglitch 3.1 0.1\nnoise 0.0 0.0\n"
+        )
+
+        plots_dir = trigdir / "plots"
+        plots_dir.mkdir()
+        (plots_dir / "skymap.png").write_bytes(b"\x89PNG")
+
+        return trigdir
+
+    def test_coherence_mode_collects_reconstructions_bayes_factors_and_skymap(
+        self, mock_production, mock_config, tmp_path
+    ):
+        mock_production.meta["likelihood"]["coherence test"] = True
+        self._make_run_tree(tmp_path, mock_production, mode="coherence")
+
+        pipeline = BayesWave(mock_production)
+        assets = pipeline.collect_assets()
+
+        assert set(assets["reconstructions"]["signal"]) == {"H1", "L1"}
+        assert set(assets["reconstructions"]["glitch"]) == {"H1", "L1"}
+        assert assets["bayes factors"]["signal:noise"] == pytest.approx(12.5)
+        assert assets["bayes factors"]["signal:glitch"] == pytest.approx(12.5 - 3.1)
+        assert assets["bayes factors"]["glitch:noise"] == pytest.approx(3.1)
+        assert assets["skymap"].endswith("skymap.png")
+
+    def test_full_mode_collects_reconstructions_but_no_bayes_factors(
+        self, mock_production, mock_config, tmp_path
+    ):
+        """--fullOnly only produces a real "full" evidence; the
+        "signal"/"glitch"/"noise" lines BayesWave still unconditionally
+        writes to evidence.dat are unrun placeholders (see
+        collect_assets()'s "Bayes factors" comment), so "full" mode must
+        NOT report Bayes factors even though evidence.dat exists and
+        happens to parse."""
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "wavelets",
+            "glitch": "wavelets",
+        }
+        self._make_run_tree(tmp_path, mock_production, mode="full")
+
+        pipeline = BayesWave(mock_production)
+        assets = pipeline.collect_assets()
+
+        assert set(assets["reconstructions"]["signal"]) == {"H1", "L1"}
+        assert set(assets["reconstructions"]["glitch"]) == {"H1", "L1"}
+        assert assets["bayes factors"] == {}
+        assert assets["skymap"].endswith("skymap.png")
+
+    def test_signal_only_mode_has_no_glitch_reconstruction(
+        self, mock_production, mock_config, tmp_path
+    ):
+        mock_production.meta["likelihood"]["components"] = {
+            "signal": "wavelets",
+            "glitch": "none",
+        }
+        self._make_run_tree(tmp_path, mock_production, mode="signal")
+
+        pipeline = BayesWave(mock_production)
+        assets = pipeline.collect_assets()
+
+        assert "signal" in assets["reconstructions"]
+        assert "glitch" not in assets["reconstructions"]
+
+    def test_psd_mode_has_no_reconstructions_or_skymap(
+        self, mock_production, mock_config, tmp_path
+    ):
+        mock_production.rundir = str(tmp_path)
+        trigdir = tmp_path / "trigtime_123.000000000_H1L1"
+        clean_dir = trigdir / "post" / "clean"
+        clean_dir.mkdir(parents=True)
+        for det in ("H1", "L1"):
+            (clean_dir / f"glitch_median_PSD_forLI_{det}.dat").write_text("1 2\n")
+
+        pipeline = BayesWave(mock_production)
+        assets = pipeline.collect_assets()
+
+        assert assets["reconstructions"] == {}
+        assert assets["bayes factors"] == {}
+        assert "skymap" not in assets
+
+
+class TestParseBayesFactors:
+    """Test _parse_bayes_factors() directly against evidence.dat-shaped
+    input, per the format verified against BayesWave.c (fprintf(evidence,
+    "signal %.12g %lg\\n", ...) etc)."""
+
+    def test_parses_all_three_pairs(self, tmp_path):
+        evidence_file = tmp_path / "evidence.dat"
+        evidence_file.write_text("signal 10.0 0.1\nglitch 4.0 0.1\nnoise 1.0 0.1\n")
+
+        bayes_factors = BayesWave._parse_bayes_factors(str(evidence_file))
+
+        assert bayes_factors["signal:noise"] == pytest.approx(9.0)
+        assert bayes_factors["signal:glitch"] == pytest.approx(6.0)
+        assert bayes_factors["glitch:noise"] == pytest.approx(3.0)
+
+    def test_missing_models_are_omitted(self, tmp_path):
+        evidence_file = tmp_path / "evidence.dat"
+        evidence_file.write_text("signal 10.0 0.1\n")
+
+        bayes_factors = BayesWave._parse_bayes_factors(str(evidence_file))
+
+        assert bayes_factors == {}
+
+    def test_ignores_malformed_lines(self, tmp_path):
+        evidence_file = tmp_path / "evidence.dat"
+        evidence_file.write_text("signal 10.0 0.1\nsomething odd\nnoise 1.0 0.1\n")
+
+        bayes_factors = BayesWave._parse_bayes_factors(str(evidence_file))
+
+        assert bayes_factors["signal:noise"] == pytest.approx(9.0)
+
+
+class TestStoreReconstructions:
+    """Test store_reconstructions(), the PSD-store-style helper that
+    commits reconstruction files to the event repository and the Asimov
+    store."""
+
+    @patch("asimov_bayeswave.bayeswave.Store")
+    def test_stores_each_component_and_ifo(
+        self, mock_store, mock_production, mock_config
+    ):
+        mock_store_instance = MagicMock()
+        mock_store.return_value = mock_store_instance
+        mock_production.event.repository.add_file = Mock()
+
+        pipeline = BayesWave(mock_production)
+        with patch.object(
+            BayesWave,
+            "collect_assets",
+            return_value={
+                "reconstructions": {
+                    "signal": {"H1": "/tmp/signal_H1.dat"},
+                    "glitch": {"H1": "/tmp/glitch_H1.dat"},
+                }
+            },
+        ):
+            pipeline.store_reconstructions()
+
+        assert mock_production.event.repository.add_file.call_count == 2
+        assert mock_store_instance.add_file.call_count == 2
+
+    @patch("asimov_bayeswave.bayeswave.Store")
+    def test_one_failure_does_not_stop_the_others(
+        self, mock_store, mock_production, mock_config
+    ):
+        mock_store.return_value = MagicMock()
+        mock_production.event.repository.add_file = Mock(
+            side_effect=[Exception("boom"), None]
+        )
+
+        pipeline = BayesWave(mock_production)
+        with patch.object(
+            BayesWave,
+            "collect_assets",
+            return_value={
+                "reconstructions": {
+                    "signal": {"H1": "/tmp/signal_H1.dat"},
+                    "glitch": {"H1": "/tmp/glitch_H1.dat"},
+                }
+            },
+        ):
+            pipeline.store_reconstructions()  # must not raise
+
+        assert mock_production.event.repository.add_file.call_count == 2
+
+
+class TestHtmlExtended:
+    """Test html() additions: reconstruction plots, a Bayes-factor table
+    and a skymap image, only when present in production.meta."""
+
+    def test_psd_only_html_unchanged(self, mock_production, mock_config):
+        mock_production.status = "finished"
+        pipeline = BayesWave(mock_production)
+        html = pipeline.html()
+
+        assert "signal_waveform" not in html
+        assert "glitch_waveform" not in html
+        assert "skymap" not in html
+        assert "Bayes factor" not in html
+
+    def test_reconstructions_and_bayes_factors_and_skymap_shown(
+        self, mock_production, mock_config
+    ):
+        mock_production.status = "finished"
+        mock_production.meta["reconstructions"] = {
+            "signal": {"H1": "/x"},
+            "glitch": {"H1": "/y"},
+        }
+        mock_production.meta["bayes factors"] = {"signal:noise": 12.3}
+        mock_production.meta["skymap"] = "/tmp/skymap.png"
+
+        pipeline = BayesWave(mock_production)
+        html = pipeline.html()
+
+        assert "signal_waveform_H1.png" in html
+        assert "glitch_waveform_H1.png" in html
+        assert "skymap.png" in html
+        assert "signal:noise" in html
+        assert "12.30" in html

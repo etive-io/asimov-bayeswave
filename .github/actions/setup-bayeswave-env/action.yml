@@ -68,7 +68,12 @@ runs:
         CONDA_BASE="$("${CONDA_EXE:-conda}" info --base)"
         CONDA_PYTHON="${CONDA_BASE}/envs/asimov/bin/python"
         "$CONDA_PYTHON" -m ensurepip --upgrade
-        "$CONDA_PYTHON" -m pip install --force-reinstall -e ".[test]"
+        # htcondor is pulled in transitively via asimov. The 25.14.x Python
+        # bindings fail to authenticate to htcondor/mini's schedd (every
+        # method, including FS, is rejected with AUTHENTICATE:1003), so
+        # asimov's Schedd().submit() never reaches the queue. 25.13.2 works
+        # against the same image. Pin until the bindings are fixed.
+        "$CONDA_PYTHON" -m pip install --force-reinstall -e ".[test]" "htcondor<25.14"
         # bayeswaveutils' megaplot.py does `import pkg_resources` (from
         # setuptools) at module load time. bayeswaveutils' own conda-forge
         # recipe declares a `setuptools<82` dependency for exactly this
