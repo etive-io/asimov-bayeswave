@@ -68,11 +68,32 @@ coherence test, or both -- add a ``components`` block under ``likelihood``:
          lines: true       # BayesLine spectral-line modelling (default: true)
      coherence test: true  # implies signal: wavelets, glitch: wavelets if not given
 
-``signal``/``glitch`` set to ``wavelets`` or ``chirplets`` enable that model; ``none``
-disables it. Setting only one of them runs BayesWave in signal-only or glitch-only mode;
-setting both (or setting ``coherence test: true`` on its own, with no ``components`` block
-at all) runs the combined signal+glitch ("full") model used for a coherence test. On-source
-PSD estimation always runs alongside whichever of these is requested, so
+``signal``/``glitch`` default to ``none`` and only turn on when set to ``wavelets`` or
+``chirplets`` -- a bare ``components:`` block, or one that only sets ``noise``, stays a
+PSD-only run (only ``coherence test: true`` defaults unset ``signal``/``glitch`` to
+``wavelets``). This resolves to one of five run modes (``BayesWave.run_mode``):
+
+======================================================  ============  ==========================
+``likelihood.components`` / ``coherence test``           Run mode      BayesWave flag(s)
+======================================================  ============  ==========================
+nothing given                                             ``psd``       ``--cleanOnly`` (unchanged)
+``signal: none``, ``glitch: none``                        ``psd``       ``--cleanOnly``
+``signal: wavelets``, ``glitch: none``                     ``signal``    ``--signalOnly``
+``signal: none``, ``glitch: wavelets``                     ``glitch``    ``--glitchOnly``
+``signal: wavelets``, ``glitch: wavelets`` (no coherence)   ``full``      ``--fullOnly``
+``coherence test: true`` (any components, or none)         ``coherence`` *(no restriction flag)*
+======================================================  ============  ==========================
+
+``full`` mode (``--fullOnly``) runs BayesWave's *combined* signal+glitch model -- the right
+choice for a joint reconstruction -- but BayesWave only writes a single "full" evidence for
+it, not separate signal/glitch/noise evidences (see BayesWaveIO.c:1858), so there is no
+``signal:glitch`` Bayes factor to compute from a ``full``-mode run. A coherence test instead
+needs ``signal``, ``glitch`` **and** ``noise`` run as genuinely independent phases so their
+evidences can be compared -- that's BayesWave's own default model set with no restriction
+flag at all (BayesWaveIO.c ~1638-1649), which is exactly what ``coherence test: true``
+(``"coherence"`` mode) requests. Because of this, ``coherence test: true`` combined with
+``signal: none`` or ``glitch: none`` raises a ``PipelineException`` -- a coherence test needs
+both. On-source PSD estimation always runs alongside whichever mode is chosen, so
 ``collect_assets()["psds"]``/``["xml psds"]`` are unaffected by ``components``.
 
 Unsupported combinations (``signal: cbc``, ``noise: {psd: fixed}``) or unknown values raise
@@ -174,11 +195,19 @@ When ``likelihood.components`` requests a signal and/or glitch run (see above),
        for ifo, path in per_ifo.items():
            print(f"{component} reconstruction for {ifo}: {path}")
 
-   # {"signal:noise": 12.3, "signal:glitch": 6.1, "glitch:noise": 6.2}
+   # {"signal:noise": 12.3, "signal:glitch": 6.1, "glitch:noise": 6.2} for "coherence"
+   # mode; {} for every other mode (see below).
    print(assets["bayes factors"])
 
    if "skymap" in assets:
        print(f"Sky map: {assets['skymap']}")
+
+``"bayes factors"`` is only populated for ``run_mode == "coherence"``. BayesWave always
+writes a ``"<model> <logZ> <var>"`` line to ``evidence.dat`` for the signal/glitch/noise
+models, even when that model didn't actually run (a placeholder ``"<model> 0 0"``), so
+parsing it for e.g. ``full`` mode (``--fullOnly``, which only computes a real "full"
+evidence) would produce misleading zero-based Bayes factors rather than none at all --
+``collect_assets()`` deliberately returns ``{}`` there instead.
 
 ``after_completion()`` stores the reconstruction files to the event repository and the
 Asimov store the same way it stores PSDs (see ``store_reconstructions()``), and merges the

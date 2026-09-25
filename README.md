@@ -113,10 +113,31 @@ data:
     L1: L1:GDS-CALIB_STRAIN
 ```
 
-Setting only `signal` (with `glitch: none`) runs BayesWave in signal-only mode; only
-`glitch` runs glitch-only; both together (or `coherence test: true` on its own) runs the
-combined "full" signal+glitch model, which is what a coherence test compares. On-source PSD
-estimation ("clean" model) always runs alongside whichever of these is requested, so
+`likelihood.components.signal`/`.glitch` default to `none` (unset entirely, or a bare
+`components:` block with neither key given, stays a PSD-only run — e.g.
+`components: {noise: {lines: false}}` on its own does *not* turn on signal/glitch).
+`coherence test: true` is the one thing that defaults unset `signal`/`glitch` to `wavelets`.
+This resolves to one of five run modes:
+
+| `likelihood.components` / `coherence test`         | Run mode     | BayesWave flag(s)        |
+|------------------------------------------------------|--------------|---------------------------|
+| nothing given                                         | `psd`        | `--cleanOnly` (unchanged) |
+| `signal: none`, `glitch: none` (or `components: {}`)  | `psd`        | `--cleanOnly`             |
+| `signal: wavelets`, `glitch: none`                    | `signal`     | `--signalOnly`            |
+| `signal: none`, `glitch: wavelets`                    | `glitch`     | `--glitchOnly`            |
+| `signal: wavelets`, `glitch: wavelets` (no coherence test) | `full`  | `--fullOnly`              |
+| `coherence test: true` (any components, or none)      | `coherence`  | *(no restriction flag)*   |
+
+`full` mode (`--fullOnly`) runs BayesWave's *combined* signal+glitch model: it's the right
+choice for a joint reconstruction, but BayesWave only writes a single "full" evidence for
+it, not separate signal/glitch/noise evidences — there is no `signal:glitch` Bayes factor to
+compute from a `full`-mode run. A coherence test instead needs `signal`, `glitch` **and**
+`noise` run as genuinely independent phases so their evidences can be compared; that's
+BayesWave's own default model set with no restriction flag at all, which is exactly what
+`coherence test: true` (`"coherence"` mode) requests. Because of this, `coherence test:
+true` combined with `signal: none` or `glitch: none` is rejected with a
+`PipelineException` — a coherence test needs both. On-source PSD estimation ("clean"
+model) always runs alongside whichever mode is chosen, so
 `collect_assets()["psds"]`/`["xml psds"]` keep working the same way regardless of mode.
 
 Once the production completes, `collect_assets()` additionally returns:
@@ -124,7 +145,10 @@ Once the production completes, `collect_assets()` additionally returns:
 - `"reconstructions"`: `{component: {ifo: path}}` for each of `"signal"`/`"glitch"` that was
   requested — the median time-domain waveform reconstruction BayesWavePost produces.
 - `"bayes factors"`: log Bayes factors parsed from BayesWave's `evidence.dat`, e.g.
-  `{"signal:noise": 12.3, "signal:glitch": 6.1, "glitch:noise": 6.2}`.
+  `{"signal:noise": 12.3, "signal:glitch": 6.1, "glitch:noise": 6.2}` — **only for
+  `"coherence"` mode** (BayesWave always writes placeholder `"<model> 0 0"` lines to
+  `evidence.dat` for models that didn't actually run, so this is `{}` for every other mode,
+  including `full`, rather than risk misleading zero-based Bayes factors).
 - `"skymap"`: path to `plots/skymap.png`, produced by megaplot.py once a signal model has run.
 
 `after_completion()` stores the reconstructions to the event repository and the Asimov store
