@@ -58,6 +58,7 @@ class BayesWave(Pipeline):
     # The job's stdout/stderr/condor logs live in <rundir>/logs; the DAG
     # itself also writes *.err in the rundir.
     log_patterns = ["logs/*.out", "logs/*.err", "logs/*.log", "*.err"]
+    _LOG_TAIL_BYTES = 1_000_000
 
     # Vocabulary accepted for likelihood.components.signal / .glitch / and
     # .noise.psd (asimov v0.8-preview asimov/vocabulary.yaml). "cbc" and
@@ -950,7 +951,8 @@ class BayesWave(Pipeline):
         dict
             Dictionary mapping log file names to their contents. The asimov
             log for the production is under ``"production"``; the rest come
-            from :attr:`log_patterns` in the run directory.
+            from :attr:`log_patterns` in the run directory, each capped to
+            its last megabyte.
         """
         messages = {}
 
@@ -963,7 +965,27 @@ class BayesWave(Pipeline):
         with open(logfile, "r") as log_f:
             messages["production"] = log_f.read()
 
-        messages.update(super().collect_logs())
+        # The rundir logs are read here rather than through
+        # Pipeline.collect_logs() so this also works with asimov 0.7, which
+        # has no default implementation.
+        for pattern in self.log_patterns:
+            for path in sorted(
+                glob.glob(os.path.join(self.production.rundir, pattern))
+            ):
+                if not os.path.isfile(path):
+                    continue
+                try:
+                    with open(path, "rb") as log_f:
+                        size = os.path.getsize(path)
+                        prefix = ""
+                        if size > self._LOG_TAIL_BYTES:
+                            log_f.seek(-self._LOG_TAIL_BYTES, os.SEEK_END)
+                            prefix = f"[... truncated, showing last {self._LOG_TAIL_BYTES} of {size} bytes ...]\n"
+                        messages[os.path.basename(path)] = prefix + log_f.read().decode(
+                            "utf-8", errors="replace"
+                        )
+                except OSError as e:
+                    messages[os.path.basename(path)] = f"[Could not read log file: {e}]"
         return messages
 
     def collect_assets(self):

@@ -730,7 +730,9 @@ class TestCollectLogs:
     def test_includes_job_output_from_the_rundir(
         self, mock_production, mock_config, tmp_path
     ):
-        log_dir = tmp_path / "logs-root" / mock_production.event.name / mock_production.name
+        log_dir = (
+            tmp_path / "logs-root" / mock_production.event.name / mock_production.name
+        )
         log_dir.mkdir(parents=True)
         (log_dir / "asimov.log").write_text("production log")
         rundir = tmp_path / "run"
@@ -740,7 +742,9 @@ class TestCollectLogs:
         (rundir / "megaplot.sub").write_text("not a log")
         mock_production.rundir = str(rundir)
         mock_config.get = lambda section, key: (
-            str(tmp_path / "logs-root") if (section, key) == ("logging", "location") else ""
+            str(tmp_path / "logs-root")
+            if (section, key) == ("logging", "location")
+            else ""
         )
 
         messages = BayesWave(mock_production).collect_logs()
@@ -757,8 +761,8 @@ class TestDeclaredIO:
     ):
         pipeline = BayesWave(mock_production)
 
-        assert pipeline.get_actual_outputs(mock_production) == ["psd"]
-        assert pipeline.get_actual_inputs(mock_production) == []
+        assert pipeline.available_outputs == ["psd"]
+        assert pipeline.required_inputs == []
 
 
 def test_module_imports():
