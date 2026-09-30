@@ -1004,6 +1004,32 @@ class TestRunModeTable:
         assert pipeline.model_flags == expected_flags
 
 
+class TestInputValidation:
+    """Missing sample rate / segment length must fail loudly in build_dag()
+    rather than rendering an empty ini that bayeswave_pipe chokes on."""
+
+    @patch("asimov_bayeswave.bayeswave.shutil.which")
+    def test_build_dag_rejects_missing_sample_rate(
+        self, mock_which, mock_production, mock_config
+    ):
+        mock_which.return_value = "/opt/conda/bin/bayeswave_pipe"
+        del mock_production.meta["likelihood"]["sample rate"]
+        pipeline = BayesWave(mock_production)
+        with pytest.raises(PipelineException, match="likelihood.sample rate"):
+            pipeline.build_dag(dryrun=True)
+
+    @patch("asimov_bayeswave.bayeswave.shutil.which")
+    def test_build_dag_rejects_missing_segment_length(
+        self, mock_which, mock_production, mock_config
+    ):
+        mock_which.return_value = "/opt/conda/bin/bayeswave_pipe"
+        del mock_production.meta["likelihood"]["segment length"]
+        del mock_production.meta["data"]["segment length"]
+        pipeline = BayesWave(mock_production)
+        with pytest.raises(PipelineException, match="data.segment length"):
+            pipeline.build_dag(dryrun=True)
+
+
 class TestTemplateRendering:
     """Render the bundled Liquid ini template the way asimov's
     Analysis.make_config() does (production=, pipeline=, config=), and
@@ -1027,6 +1053,33 @@ class TestTemplateRendering:
             rendered.index("[bayeswave_post_options]") : rendered.index("[condor]")
         ]
         return options, post_options
+
+    def _input_section(self, mock_production, mock_config):
+        pipeline = BayesWave(mock_production)
+        rendered = Liquid(CONFIG_TEMPLATE).render(
+            production=mock_production, pipeline=pipeline, config=mock_config
+        )
+        return rendered[rendered.index("[input]") : rendered.index("[engine]")]
+
+    def test_lengths_default_to_data_segment_length(
+        self, mock_production, mock_config
+    ):
+        """window and PSDlength must fall back to data.segment length (the
+        canonical location) when likelihood has no segment length."""
+        del mock_production.meta["likelihood"]["segment length"]
+        mock_production.meta["data"]["segment length"] = 16
+        section = self._input_section(mock_production, mock_config)
+        assert "seglen=16" in section
+        assert "window=16" in section
+        assert "PSDlength=16" in section
+
+    def test_lengths_fall_back_to_legacy_likelihood_segment_length(
+        self, mock_production, mock_config
+    ):
+        del mock_production.meta["data"]["segment length"]
+        section = self._input_section(mock_production, mock_config)
+        assert "seglen=8" in section
+        assert "PSDlength=8" in section
 
     def test_default_renders_cleanonly_psd_run(self, mock_production, mock_config):
         """Regression test: with no likelihood.components at all, the

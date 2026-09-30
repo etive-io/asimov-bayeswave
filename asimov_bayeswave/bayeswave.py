@@ -146,6 +146,7 @@ class BayesWave(Pipeline):
            Raised if the construction of the DAG fails.
         """
         self._validate_components()
+        self._validate_inputs()
 
         if self.production.event.repository:
             try:
@@ -687,6 +688,33 @@ class BayesWave(Pipeline):
             "chirplets": chirplets,
             "mode": mode,
         }
+
+    def _validate_inputs(self):
+        """
+        Check that the settings ``bayeswave_pipe`` cannot run without are set.
+
+        The bundled ini template renders ``srate``, ``seglen``, ``PSDlength``
+        and ``window`` straight from the production's metadata. A missing
+        value would silently render as an empty string and only surface as an
+        opaque ``ValueError`` inside ``bayeswave_pipe``, so raise a clear
+        ``PipelineException`` here instead.
+        """
+        meta = self.production.meta
+        likelihood = meta.get("likelihood", {})
+        data = meta.get("data", {})
+        missing = []
+        if not (likelihood.get("sample rate") or data.get("sample rate")):
+            missing.append("likelihood.sample rate")
+        if not (data.get("segment length") or likelihood.get("segment length")):
+            missing.append("data.segment length")
+        if missing:
+            raise PipelineException(
+                "BayesWave needs "
+                + " and ".join(missing)
+                + " to be set on the production (or its event) but "
+                + ("it is" if len(missing) == 1 else "they are")
+                + " missing."
+            )
 
     def _validate_components(self):
         """
