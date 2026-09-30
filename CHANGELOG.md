@@ -7,8 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-30
+
 ### Added
-- Signal and glitch reconstructions (issue #2): a production can now request BayesWave's
+- Signal and glitch reconstructions (issue #2, PR #3): a production can now request BayesWave's
   signal and/or glitch wavelet models, not just on-source PSD estimation, via the
   pipeline-agnostic `likelihood.components` ledger term (`signal`/`glitch`:
   `none`/`wavelets`/`chirplets`, plus `noise.psd`/`noise.lines`), and the pre-existing
@@ -56,18 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `[bayeswave_options]` to `[bayeswave_post_options]`) was verified against the BayesWave
     source (`git.ligo.org/lscsoft/bayeswave`), not guessed -- see the plugin's docstrings
     and inline comments for the specific source locations.
-- Initial release of asimov-bayeswave plugin
-- BayesWave pipeline integration for Asimov 0.7+
-- Automatic PSD generation and collection
-- XML format PSD conversion
-- HTCondor DAG generation and submission
-- Post-processing and result collection
-- PSD suppression capabilities
-- Megaplot output collection
-- Comprehensive test suite
-- Sphinx documentation with kentigern theme
-- GitHub Actions CI/CD workflows
-- `[asimov]` optional dependency group for explicit asimov integration
 - `config_template` property, pointing at the bundled
   `asimov_bayeswave/configs/bayeswave.ini`, so `asimov manage build` can render a
   production's `.ini` directly from ledger meta-data (this property was entirely missing;
@@ -81,10 +71,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   crashing post-processing
 
 ### Changed
-- Extracted BayesWave integration from Asimov core into standalone plugin
-- Removed deprecation warning from Asimov 0.6
-- Updated version constraint to require asimov>=0.7
-- Added installation instructions for asimov[gw]
 - `submit_dag()` now uses `self.scheduler.submit_dag(...)` (asimov's scheduler-agnostic
   HTCondor/Slurm API) instead of shelling out to `condor_submit_dag` directly and
   regex-scraping its stdout, matching the pattern used in the sibling
@@ -102,9 +88,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `build_dag()` now emits the `--igwn-pool` flag instead of the deprecated `--osg-deploy`
   (confirmed via `bayeswave_pipe --help`: the old flag still works but is reported as
   "OUTDATED. please use --igwn-pool instead")
+- CI: the unit-test matrix no longer includes macOS (`htcondor` has no macOS wheels), and
+  the e2e environment pins `htcondor<25.14` and `setuptools<82` (for `megaplot.py`'s
+  `pkg_resources` use)
 
 ### Fixed
-- Updated dependency constraint to support asimov 0.7 (changed from `asimov>=0.6.0` to `asimov>=0.7`)
 - **`collect_assets()` crashed on every single monitoring poll before a job finished**,
   not just at the end: whenever a detector's PSD glob had no matches yet (the normal case
   while a job is still running -- which is the entire point of `detect_completion()`
@@ -170,7 +158,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wheel install would not actually include it -- meaning the new `config_template`
   property would have pointed at a file that doesn't exist once truly installed. Added
   `[tool.setuptools.package-data]`, matching the sibling `asimov-lalinference` plugin
-- `after_completion()` always attempted XML PSD conversion via `convert_psd_ascii2xml`,
+- (PR #1) `after_completion()` always attempted XML PSD conversion via `convert_psd_ascii2xml`,
   which ships with RIFT, not BayesWave -- this plugin deliberately does not depend on
   RIFT, so the tool is routinely absent. The resulting `FileNotFoundError` ->
   `PipelineException` was caught but logged as an `.error()` on every single completion,
@@ -180,10 +168,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cleanly with an `.info()`-level log when it's absent; the ascii-format PSDs are
   unaffected either way
 
-## [0.1.0] - TBD
+## [0.2.0] - 2026-08-17
+
+### Fixed
+- `BayesWave.flow` read `production.meta["quality"]["minimum frequency"]`, which fails once
+  `minimum frequency` has moved to the `likelihood` section; it now reads from `likelihood`
+
+## [0.1.0] - 2026-02-12
 
 ### Added
-- First public release
+- Initial release of asimov-bayeswave plugin
+- BayesWave pipeline integration for Asimov 0.7+
+- Automatic PSD generation and collection
+- XML format PSD conversion
+- HTCondor DAG generation and submission
+- Post-processing and result collection
+- PSD suppression capabilities
+- Megaplot output collection
+- Comprehensive test suite
+- Sphinx documentation with kentigern theme
+- GitHub Actions CI/CD workflows
+- `[asimov]` optional dependency group for explicit asimov integration
 
-[Unreleased]: https://github.com/transientlunatic/asimov-bayeswave/compare/v0.1.0...HEAD
+### Changed
+- Extracted BayesWave integration from Asimov core into standalone plugin
+- Removed deprecation warning from Asimov 0.6
+- Updated version constraint to require asimov>=0.7
+- Added installation instructions for asimov[gw]
+
+### Fixed
+- Updated dependency constraint to support asimov 0.7 (changed from `asimov>=0.6.0` to `asimov>=0.7`)
+
+[Unreleased]: https://github.com/transientlunatic/asimov-bayeswave/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/transientlunatic/asimov-bayeswave/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/transientlunatic/asimov-bayeswave/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/transientlunatic/asimov-bayeswave/releases/tag/v0.1.0
