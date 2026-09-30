@@ -727,6 +727,39 @@ class TestCollectLogs:
 
         assert messages["production"] == "hello from the production log"
 
+    def test_includes_job_output_from_the_rundir(
+        self, mock_production, mock_config, tmp_path
+    ):
+        log_dir = tmp_path / "logs-root" / mock_production.event.name / mock_production.name
+        log_dir.mkdir(parents=True)
+        (log_dir / "asimov.log").write_text("production log")
+        rundir = tmp_path / "run"
+        (rundir / "logs").mkdir(parents=True)
+        (rundir / "logs" / "BayesWave_x-1-0.out").write_text("RJMCMC: 5/10 (1,0)")
+        (rundir / "logs" / "BayesWave_x-1-0.err").write_text("a warning")
+        (rundir / "megaplot.sub").write_text("not a log")
+        mock_production.rundir = str(rundir)
+        mock_config.get = lambda section, key: (
+            str(tmp_path / "logs-root") if (section, key) == ("logging", "location") else ""
+        )
+
+        messages = BayesWave(mock_production).collect_logs()
+
+        assert messages["production"] == "production log"
+        assert messages["BayesWave_x-1-0.out"] == "RJMCMC: 5/10 (1,0)"
+        assert messages["BayesWave_x-1-0.err"] == "a warning"
+        assert "megaplot.sub" not in messages
+
+
+class TestDeclaredIO:
+    def test_advertises_psd_and_requires_nothing_from_other_analyses(
+        self, mock_production, mock_config
+    ):
+        pipeline = BayesWave(mock_production)
+
+        assert pipeline.get_actual_outputs(mock_production) == ["psd"]
+        assert pipeline.get_actual_inputs(mock_production) == []
+
 
 def test_module_imports():
     """Test that the module imports correctly."""

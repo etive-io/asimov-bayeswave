@@ -49,6 +49,16 @@ class BayesWave(Pipeline):
     name = "BayesWave"
     STATUS = {"wait", "stuck", "stopped", "running", "finished"}
 
+    # Every run mode leaves BayesWave's "clean" model on, so the PSDs are
+    # always produced (see _MODE_FLAG below). Frame data comes from datafind
+    # or asimov-gwdata rather than another analysis, so it is not a required
+    # input.
+    available_outputs = ["psd"]
+
+    # The job's stdout/stderr/condor logs live in <rundir>/logs; the DAG
+    # itself also writes *.err in the rundir.
+    log_patterns = ["logs/*.out", "logs/*.err", "logs/*.log", "*.err"]
+
     # Vocabulary accepted for likelihood.components.signal / .glitch / and
     # .noise.psd (asimov v0.8-preview asimov/vocabulary.yaml). "cbc" and
     # "fixed" are recognised but not yet implemented by this plugin -- see
@@ -938,7 +948,9 @@ class BayesWave(Pipeline):
         Returns
         -------
         dict
-            Dictionary mapping log file names to their contents.
+            Dictionary mapping log file names to their contents. The asimov
+            log for the production is under ``"production"``; the rest come
+            from :attr:`log_patterns` in the run directory.
         """
         messages = {}
 
@@ -949,16 +961,9 @@ class BayesWave(Pipeline):
             "asimov.log",
         )
         with open(logfile, "r") as log_f:
-            message = log_f.read()
-            messages["production"] = message
+            messages["production"] = log_f.read()
 
-        logs = glob.glob(f"{self.production.rundir}/logs/*.err") + glob.glob(
-            f"{self.production.rundir}/*.err"
-        )
-        for log in logs:
-            with open(log, "r") as log_f:
-                message = log_f.read()
-                messages[log.split("/")[-1]] = message
+        messages.update(super().collect_logs())
         return messages
 
     def collect_assets(self):
