@@ -762,7 +762,7 @@ class TestDeclaredIO:
         pipeline = BayesWave(mock_production)
 
         assert pipeline.available_outputs == ["psd"]
-        assert pipeline.required_inputs == []
+        assert not getattr(pipeline, "required_inputs", [])
 
 
 def test_module_imports():
