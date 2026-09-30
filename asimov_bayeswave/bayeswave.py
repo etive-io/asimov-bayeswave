@@ -3,6 +3,7 @@
 import configparser
 import glob
 import os
+import re
 import shutil
 import subprocess
 from shutil import copyfile, copytree
@@ -1223,6 +1224,37 @@ class BayesWave(Pipeline):
         """Link to the copied megaplot output for the report modal."""
         pages_dir = os.path.join(self.production.event.name, self.production.name)
         return [("Full Megaplot output", f"{pages_dir}/index.html")]
+
+    def check_progress(self):
+        """
+        Report sampling progress from the BayesWave job's output.
+
+        BayesWave prints ``RJMCMC: <iteration>/<total> ...`` and a following
+        ``logL=...`` line every ``Niter/10`` iterations. After a checkpoint
+        restart there is one log per submission, so the newest one is used.
+
+        Returns
+        -------
+        dict
+            ``{"BayesWave": (iteration, logL)}``, e.g.
+            ``("75000/250000", "logL=-59482.29")``, or ``{}`` if the job has
+            not started sampling.
+        """
+        logs = glob.glob(f"{self.production.rundir}/logs/BayesWave_*.out")
+        if not logs:
+            return {}
+        try:
+            with open(max(logs, key=os.path.getmtime), "r") as log_f:
+                lines = log_f.read().splitlines()
+        except OSError:
+            return {}
+
+        for i in range(len(lines) - 1, -1, -1):
+            match = re.match(r"RJMCMC: (\d+/\d+)", lines[i])
+            if match:
+                logl = re.search(r"logL=\S+", "\n".join(lines[i + 1 : i + 3]))
+                return {"BayesWave": (match.group(1), logl.group(0) if logl else "")}
+        return {}
 
     def html(self):
         """
