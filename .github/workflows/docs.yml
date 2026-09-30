@@ -32,12 +32,14 @@ jobs:
         make html
 
     - name: Upload documentation artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-pages-artifact@v3
       with:
-        name: documentation
         path: docs/build/html
 
   deploy:
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
