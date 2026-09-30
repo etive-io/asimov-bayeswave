@@ -50,6 +50,17 @@ class BayesWave(Pipeline):
     name = "BayesWave"
     STATUS = {"wait", "stuck", "stopped", "running", "finished"}
 
+    # Every run mode leaves BayesWave's "clean" model on, so the PSDs are
+    # always produced (see _MODE_FLAG below). Frame data comes from datafind
+    # or asimov-gwdata rather than another analysis, so it is not a required
+    # input.
+    available_outputs = ["psd"]
+
+    # The job's stdout/stderr/condor logs live in <rundir>/logs; the DAG
+    # itself also writes *.err in the rundir.
+    log_patterns = ["logs/*.out", "logs/*.err", "logs/*.log", "*.err"]
+    _LOG_TAIL_BYTES = 1_000_000
+
     # Vocabulary accepted for likelihood.components.signal / .glitch / and
     # .noise.psd (asimov v0.8-preview asimov/vocabulary.yaml). "cbc" and
     # "fixed" are recognised but not yet implemented by this plugin -- see
@@ -939,7 +950,10 @@ class BayesWave(Pipeline):
         Returns
         -------
         dict
-            Dictionary mapping log file names to their contents.
+            Dictionary mapping log file names to their contents. The asimov
+            log for the production is under ``"production"``; the rest come
+            from :attr:`log_patterns` in the run directory, each capped to
+            its last megabyte.
         """
         messages = {}
 
@@ -950,16 +964,29 @@ class BayesWave(Pipeline):
             "asimov.log",
         )
         with open(logfile, "r") as log_f:
-            message = log_f.read()
-            messages["production"] = message
+            messages["production"] = log_f.read()
 
-        logs = glob.glob(f"{self.production.rundir}/logs/*.err") + glob.glob(
-            f"{self.production.rundir}/*.err"
-        )
-        for log in logs:
-            with open(log, "r") as log_f:
-                message = log_f.read()
-                messages[log.split("/")[-1]] = message
+        # The rundir logs are read here rather than through
+        # Pipeline.collect_logs() so this also works with asimov 0.7, which
+        # has no default implementation.
+        for pattern in self.log_patterns:
+            for path in sorted(
+                glob.glob(os.path.join(self.production.rundir, pattern))
+            ):
+                if not os.path.isfile(path):
+                    continue
+                try:
+                    with open(path, "rb") as log_f:
+                        size = os.path.getsize(path)
+                        prefix = ""
+                        if size > self._LOG_TAIL_BYTES:
+                            log_f.seek(-self._LOG_TAIL_BYTES, os.SEEK_END)
+                            prefix = f"[... truncated, showing last {self._LOG_TAIL_BYTES} of {size} bytes ...]\n"
+                        messages[os.path.basename(path)] = prefix + log_f.read().decode(
+                            "utf-8", errors="replace"
+                        )
+                except OSError as e:
+                    messages[os.path.basename(path)] = f"[Could not read log file: {e}]"
         return messages
 
     def collect_assets(self):

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Declare `available_outputs = ["psd"]` so asimov 0.8's `validate_needs()` can check that
+  analyses needing a PSD depend on a BayesWave analysis.
+
+### Changed
+- `collect_logs()` now also returns the job's `logs/*.out`, `logs/*.err` and `logs/*.log`
+  (via `log_patterns`), so the sampler output appears in asimov's log preview.
+
 ## [0.3.0] - 2026-09-30
 
 ### Added
