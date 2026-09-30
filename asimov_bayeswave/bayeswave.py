@@ -1219,6 +1219,11 @@ class BayesWave(Pipeline):
                 "Bayeswave resurrection not completed as there have already been 5 attempts"
             )
 
+    def result_pages(self):
+        """Link to the copied megaplot output for the report modal."""
+        pages_dir = os.path.join(self.production.event.name, self.production.name)
+        return [("Full Megaplot output", f"{pages_dir}/index.html")]
+
     def html(self):
         """
         Return the HTML representation of this pipeline.

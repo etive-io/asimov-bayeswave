@@ -687,6 +687,18 @@ class TestHtml:
 
         assert html == ""
 
+    def test_result_pages_link_to_megaplot_index(self, mock_production, mock_config):
+        """The report modal gets a link to the copied megaplot page."""
+        pipeline = BayesWave(mock_production)
+        pages = pipeline.result_pages()
+
+        assert pages == [
+            (
+                "Full Megaplot output",
+                f"{mock_production.event.name}/{mock_production.name}/index.html",
+            )
+        ]
+
 
 class TestCollectLogs:
     """Regression test for a real bug: collect_logs() read
