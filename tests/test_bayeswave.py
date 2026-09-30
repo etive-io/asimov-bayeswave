@@ -700,6 +700,42 @@ class TestHtml:
         ]
 
 
+class TestCheckProgress:
+    """check_progress() reports the sampler iteration from the job output."""
+
+    def _log(self, tmp_path, name, text):
+        logs = tmp_path / "logs"
+        logs.mkdir(exist_ok=True)
+        (logs / name).write_text(text)
+
+    def test_reports_latest_iteration_and_logl(self, mock_production, tmp_path):
+        mock_production.rundir = str(tmp_path)
+        self._log(
+            tmp_path,
+            "BayesWave_trigtime_1-1-0.out",
+            "RJMCMC: 0/250000 (1,0)\n  logL=-59710.459654 hSNR=0\n"
+            "RJMCMC: 25000/250000 (1,0)\n  logL=-59769.570456 hSNR=0\n"
+            "  DIM: DGW=0\n",
+        )
+
+        assert BayesWave(mock_production).check_progress() == {
+            "BayesWave": ("25000/250000", "logL=-59769.570456")
+        }
+
+    def test_ignores_the_post_processing_log(self, mock_production, tmp_path):
+        mock_production.rundir = str(tmp_path)
+        self._log(tmp_path, "BayesWavePost_trigtime_1-2-0.out", "RJMCMC: 5/10 (1,0)\n")
+
+        assert BayesWave(mock_production).check_progress() == {}
+
+    def test_no_logs_or_no_sampling_yet(self, mock_production, tmp_path):
+        mock_production.rundir = str(tmp_path)
+        assert BayesWave(mock_production).check_progress() == {}
+
+        self._log(tmp_path, "BayesWave_trigtime_1-1-0.out", "starting up\n")
+        assert BayesWave(mock_production).check_progress() == {}
+
+
 class TestCollectLogs:
     """Regression test for a real bug: collect_logs() read
     config.get("logging", "directory"), but "directory" is not a real
