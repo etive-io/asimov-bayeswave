@@ -71,8 +71,8 @@ pipeline: bayeswave
 comment: PSD generation with BayesWave
 likelihood:
   sample rate: 2048
-  segment length: 8
 data:
+  segment length: 8
   channels:
     H1: H1:GDS-CALIB_STRAIN
     L1: L1:GDS-CALIB_STRAIN
@@ -96,7 +96,6 @@ pipeline: bayeswave
 comment: Signal and glitch reconstruction with BayesWave
 likelihood:
   sample rate: 2048
-  segment length: 8
   minimum frequency:
     H1: 20
     L1: 20
@@ -108,6 +107,7 @@ likelihood:
       lines: true       # BayesLine spectral-line modelling
   coherence test: true  # implies signal: wavelets, glitch: wavelets if not given
 data:
+  segment length: 8
   channels:
     H1: H1:GDS-CALIB_STRAIN
     L1: L1:GDS-CALIB_STRAIN

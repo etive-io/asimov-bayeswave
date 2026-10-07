@@ -18,8 +18,8 @@ in Asimov. You can specify it as the pipeline in your production configuration:
        meta:
          likelihood:
            sample rate: 2048
-           segment length: 8
          data:
+           segment length: 8
            channels:
              H1: H1:GDS-CALIB_STRAIN
              L1: L1:GDS-CALIB_STRAIN
@@ -41,9 +41,8 @@ Likelihood Settings
 
    likelihood:
      sample rate: 2048          # Sampling rate in Hz
-     segment length: 8          # Segment length in seconds
-     window length: 4           # Window length (optional)
-     psd length: 8              # PSD estimation length
+     window length: 4           # Window length (optional; defaults to data.segment length)
+     psd length: 8              # PSD estimation length (optional; defaults to data.segment length)
      roll off time: 1.0         # Roll-off time
      iterations: 100000         # Number of MCMC iterations
      chains: 8                  # Number of parallel chains
