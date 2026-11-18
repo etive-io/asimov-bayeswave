@@ -336,7 +336,10 @@ class BayesWave(Pipeline):
         mode = self.run_mode
 
         if mode == "psd":
-            psds = self.collect_assets()["psds"]
+            # BayesWave's own output in this run directory, not
+            # collect_assets(): that also returns PSDs committed to the event
+            # repository, which may belong to an earlier BayesWave run.
+            psds = self._original_psds()
             if len(list(psds.values())) > 0:
                 return True
             else:
@@ -442,8 +445,9 @@ class BayesWave(Pipeline):
         """
         Perform post-processing after the BayesWave job completes.
 
-        This includes converting PSDs to XML format, collecting output
-        pages, storing assets, and applying PSD suppressions if configured.
+        In order: produce the final PSDs (applying any configured
+        suppression, see :meth:`finalise_psds`), convert them to XML, collect
+        the output pages, and store the PSDs and reconstructions.
         """
         # convert_psd_ascii2xml ships with RIFT, not BayesWave, and this
         # plugin deliberately does not depend on RIFT -- so it may
@@ -453,9 +457,18 @@ class BayesWave(Pipeline):
         # try/except below to paper over what is then an expected, routine
         # condition rather than a real failure. The ascii-format PSDs are
         # unaffected either way.
+        # Suppression first, so that the XML PSDs, the stored PSDs and the
+        # PSDs handed to later analyses are all the final ones.
+        final_psds = {}
+        try:
+            final_psds = self.finalise_psds()
+        except Exception as e:
+            self.logger.error("Failed to finalise (suppress and commit) the PSDs")
+            self.logger.exception(e)
+
         if shutil.which("convert_psd_ascii2xml"):
             try:
-                for ifo, psd in self.collect_assets()["psds"].items():
+                for ifo, psd in (final_psds or self.collect_assets()["psds"]).items():
                     self._convert_psd(ascii_format=psd, ifo=ifo)
             except Exception as e:
                 self.logger.error("Failed to convert the PSDs to XML")
@@ -489,15 +502,6 @@ class BayesWave(Pipeline):
         except Exception as e:
             self.logger.error("Failed to store the reconstructions")
             self.logger.exception(e)
-
-        if "supress" in self.production.meta.get("quality", {}):
-            for ifo in self.production.meta["quality"]["supress"]:
-                if ifo in self.production.meta["interferometers"]:
-                    self.supress_psd(
-                        ifo,
-                        self.production.meta["quality"]["supress"][ifo]["lower"],
-                        self.production.meta["quality"]["supress"][ifo]["upper"],
-                    )
 
         self.production.meta.update(self.collect_assets())
 
@@ -1002,30 +1006,24 @@ class BayesWave(Pipeline):
             Dictionary containing 'psds' and 'xml psds' keys with paths to
             the generated power spectral density files.
         """
+        # The PSD later analyses should use: the final (possibly suppressed)
+        # PSD committed to the event repository, else the final copy in the
+        # run directory (e.g. with no event repository), else -- only before
+        # finalise_psds() has run -- BayesWave's raw output, which is what
+        # detect_completion() polls for. (The raw-output glob legitimately
+        # returns [] on every poll before the run completes.)
         psds = {}
+        originals = self._original_psds()
         for det in self.production.meta["interferometers"]:
-            # NOTE: this glob legitimately returns [] on every poll before
-            # the run completes -- that's the whole point of
-            # detect_completion() calling this repeatedly. A previous
-            # version of this loop left `asset` as that empty list and then
-            # called os.path.exists(asset) unconditionally, which raises
-            # TypeError (os.path.exists only accepts a path, not a list) --
-            # i.e. it crashed on every single monitoring poll prior to
-            # completion, not just at the end. Existing unit tests never
-            # caught this because they mock os.path.exists to always return
-            # True. Guard explicitly instead.
-            matches = glob.glob(
-                os.path.join(
-                    self.production.rundir,
-                    "trigtime*",
-                    "post",
-                    "clean",
-                    f"glitch_median_PSD_forLI_{det}.dat",
-                )
-            )
-            if matches and os.path.exists(matches[0]):
-                psds[det] = matches[0]
-
+            candidates = [
+                self._repository_psd(det),
+                os.path.join(self._final_psd_directory(), f"{det}-psd.dat"),
+                originals.get(det),
+            ]
+            for candidate in candidates:
+                if candidate and os.path.exists(candidate):
+                    psds[det] = os.path.abspath(candidate)
+                    break
         outputs = {}
         outputs["psds"] = psds
 
@@ -1154,81 +1152,143 @@ class BayesWave(Pipeline):
 
         return bayes_factors
 
-    def supress_psd(self, ifo, fmin, fmax):
+    @staticmethod
+    def _suppression_ranges(spec):
         """
-        Suppress portions of a PSD.
+        Normalise a ``quality: supress: <ifo>:`` entry into a list of
+        ``{"lower": ..., "upper": ...}`` ranges. A single mapping (the
+        original format) or a list of them (asimov 0.5.14, ligo!182) are both
+        accepted.
+        """
+        if isinstance(spec, dict):
+            return [spec]
+        return list(spec or [])
+
+    def _suppression_spec(self):
+        quality = self.production.meta.get("quality", {}) or {}
+        # "supress" is the established ledger key; accept the correct
+        # spelling too.
+        return quality.get("supress", quality.get("suppress", {})) or {}
+
+    def supress_psd(self, ifo, ranges, psd_file, output_file):
+        """
+        Suppress one or more frequency bands of a PSD.
 
         Author: Carl-Johan Haster - August 2020
-        (Updated for asimov by Daniel Williams - November 2020)
+        (Updated for asimov by Daniel Williams - November 2020; multiple
+        ranges added in asimov 0.5.14 and ported here)
+
+        The PSD is set to 1.0 inside every band, so the data there carries no
+        weight. All bands are applied in one pass, and the result is written
+        once, at full precision.
 
         Parameters
         ----------
         ifo : str
-            Interferometer name (e.g., 'H1', 'L1', 'V1')
-        fmin : float
-            Lower frequency bound for suppression region in Hz
-        fmax : float
-            Upper frequency bound for suppression region in Hz
+            Interferometer name (e.g. ``"H1"``).
+        ranges : dict or list of dict
+            ``{"lower": f_min, "upper": f_max}`` in Hz, or a list of them.
+        psd_file : str
+            The two-column ASCII PSD to suppress (the original BayesWave
+            output).
+        output_file : str
+            Where to write the suppressed PSD.
+
+        Returns
+        -------
+        str
+            ``output_file``.
         """
-        store = Store(root=config.get("storage", "directory"))
-        sample_rate = self.production.meta["likelihood"]["sample rate"]
-        orig_PSD_file = np.genfromtxt(
-            os.path.join(
-                self.production.event.repository.directory,
-                self.category,
+        ranges = self._suppression_ranges(ranges)
+        data = np.genfromtxt(psd_file)
+        freq = data[:, 0]
+        psd = data[:, 1].copy()
+        for band in ranges:
+            fmin, fmax = float(band["lower"]), float(band["upper"])
+            region = np.logical_and(np.greater_equal(freq, fmin), np.less_equal(freq, fmax))
+            psd[region] = 1.0
+            self.logger.info(f"{ifo} PSD suppressed between {fmin} Hz and {fmax} Hz")
+        os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
+        # Full precision: the previous "%+.5e" kept only six significant
+        # figures of every PSD value.
+        np.savetxt(output_file, np.column_stack([freq, psd]), fmt="%.17e")
+        return output_file
+
+    def _final_psd_directory(self):
+        return os.path.join(self.production.rundir, "asimov-psds")
+
+    def _repository_psd(self, ifo, extension="dat"):
+        repository = getattr(self.production.event, "repository", None)
+        directory = getattr(repository, "directory", None) if repository else None
+        if not directory:
+            return None
+        return os.path.join(
+            directory,
+            self.production.category,
+            "psds",
+            f"{self.production.meta['likelihood']['sample rate']}",
+            f"{ifo}-psd.{extension}",
+        )
+
+    def _original_psds(self):
+        """The PSDs exactly as BayesWave wrote them, from the run directory."""
+        psds = {}
+        for det in self.production.meta["interferometers"]:
+            matches = glob.glob(
+                os.path.join(
+                    self.production.rundir,
+                    "trigtime*",
+                    "post",
+                    "clean",
+                    f"glitch_median_PSD_forLI_{det}.dat",
+                )
+            )
+            if matches and os.path.exists(matches[0]):
+                psds[det] = matches[0]
+        return psds
+
+    def finalise_psds(self):
+        """
+        Produce the PSDs later analyses should use, once BayesWave has finished.
+
+        For each interferometer this is BayesWave's PSD with any configured
+        suppression applied. It is written to ``<rundir>/asimov-psds/`` and
+        committed to the event repository (when there is one), so that
+        :meth:`collect_assets` -- and so ``needs:`` dependents -- get the
+        suppressed PSD rather than BayesWave's raw output. (asimov 0.5.15,
+        ligo!183, fixed the same mismatch in asimov's bundled pipeline.)
+
+        Returns
+        -------
+        dict
+            The final PSD for each interferometer.
+        """
+        spec = self._suppression_spec()
+        final = {}
+        for ifo, original in self._original_psds().items():
+            target = os.path.join(self._final_psd_directory(), f"{ifo}-psd.dat")
+            if ifo in spec:
+                self.supress_psd(ifo, spec[ifo], original, target)
+            else:
+                os.makedirs(self._final_psd_directory(), exist_ok=True)
+                copyfile(original, target)
+            final[ifo] = target
+            destination = os.path.join(
+                self.production.category,
                 "psds",
-                str(sample_rate),
+                str(self.production.meta["likelihood"]["sample rate"]),
                 f"{ifo}-psd.dat",
             )
-        )
-
-        self.logger.info("PSD supression has been set")
-        self.logger.info(
-            f"{ifo}-psd.dat will be supressed between {fmin}-Hz and {fmax}-Hz"
-        )
-
-        freq = orig_PSD_file[:, 0]
-        PSD = orig_PSD_file[:, 1]
-
-        suppression_region = np.logical_and(
-            np.greater_equal(freq, fmin), np.less_equal(freq, fmax)
-        )
-
-        # Suppress the PSD in this region
-        PSD[suppression_region] = 1.0
-
-        new_PSD = np.vstack([freq, PSD]).T
-
-        asset = f"{ifo}-psd.dat"
-        np.savetxt(asset, new_PSD, fmt="%+.5e")
-
-        destination = os.path.join(
-            self.category, "psds", str(sample_rate), f"{ifo}-psd.dat"
-        )
-
-        self.logger.info(
-            f"{ifo}-psd.dat has been supressed between {fmin}-Hz and {fmax}-Hz"
-        )
-
-        try:
-            self.production.event.repository.add_file(asset, destination)
-        except Exception as e:
-            self.logger.error(
-                "The supressed PSD could not be committed to the repository"
-            )
-            self.logger.exception(e)
-
-        copyfile(asset, f"{ifo}-{sample_rate}-psd-suppresed.dat")
-        try:
-            store.add_file(
-                self.production.event.name,
-                self.production.name,
-                file=f"{ifo}-{sample_rate}-psd-suppresed.dat",
-            )
-        except AlreadyPresentException:
-            self.logger.warning(
-                "Attempted to add a supressed PSD which already exists."
-            )
+            try:
+                self.production.event.repository.add_file(
+                    target,
+                    destination,
+                    commit_message=f"Added the {'suppressed ' if ifo in spec else ''}PSD for {ifo}.",
+                )
+            except Exception as e:
+                self.logger.error(f"The PSD for {ifo} could not be committed to the repository")
+                self.logger.exception(e)
+        return final
 
     def resurrect(self):
         """

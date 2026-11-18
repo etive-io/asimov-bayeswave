@@ -11,7 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Declare `available_outputs = ["psd"]` so asimov 0.8's `validate_needs()` can check that
   analyses needing a PSD depend on a BayesWave analysis.
 
+- `quality: supress:` accepts a list of `{lower, upper}` bands per interferometer as well as a
+  single band; all bands are applied in one pass (ported from asimov 0.5.14, ligo!182).
+- `scheduler: container:` sets `[engine] singularity` in the bayeswave_pipe config, so BayesWave
+  can run in a container (ported from asimov 0.5.15, ligo!184).
+
+### Fixed
+- PSD suppression now reaches later analyses. Previously the suppressed PSD was committed to the
+  event repository, but `collect_assets()` -- and so `needs:` dependents and the production's own
+  metadata -- returned BayesWave's raw, unsuppressed PSD, and the XML PSD was converted from the
+  raw one before suppression was applied. The new `finalise_psds()` runs first in
+  `after_completion()` and produces the final PSD for each interferometer (suppressed where
+  configured), which is what is converted, stored, committed and returned by `collect_assets()`
+  (the same fix as asimov 0.5.15, ligo!183).
+- Suppressed PSDs are written at full precision; they were written with `%+.5e`, keeping only
+  six significant figures.
+- `detect_completion()` (PSD mode) reads this run's own BayesWave output, so a PSD committed to the
+  event repository by an earlier BayesWave run no longer makes a new run look complete.
+
 ### Changed
+- `supress_psd()` now takes the bands, the input PSD file and the output file:
+  `supress_psd(ifo, ranges, psd_file, output_file)`.
 - `collect_logs()` now also returns the job's `logs/*.out`, `logs/*.err` and `logs/*.log`
   (via `log_patterns`), so the sampler output appears in asimov's log preview.
 

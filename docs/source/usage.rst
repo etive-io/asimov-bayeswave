@@ -128,9 +128,12 @@ Quality Settings
        L1: 20
      lowest minimum frequency: 20  # Auto-calculated if not provided
      supress:                      # Optional: suppress frequency bands
-       H1:
+       H1:                         # one band ...
          lower: 60
          upper: 60.5
+       L1:                         # ... or a list of bands
+         - {lower: 59.5, upper: 60.5}
+         - {lower: 119.5, upper: 120.5}
 
 Scheduler Settings
 ~~~~~~~~~~~~~~~~~~
@@ -216,15 +219,24 @@ Bayes factors into ``production.meta`` (the same way it already does for PSDs).
 PSD Suppression
 ~~~~~~~~~~~~~~~
 
-You can suppress specific frequency bands in the PSD (e.g., to remove
-instrumental lines):
+You can suppress frequency bands in the PSD (e.g. to remove instrumental
+lines) with ``quality: supress:`` in the blueprint, giving either one
+``{lower, upper}`` band or a list of them per interferometer (see the example
+above). Inside each band the PSD is set to 1.0, so the data there carries no
+weight.
 
-.. code-block:: python
+Suppression is applied when the BayesWave job completes, before anything else
+uses the PSDs: ``finalise_psds()`` writes the final (suppressed) PSD for each
+interferometer to ``<rundir>/asimov-psds/`` and commits it to the event
+repository, and it is this PSD that is converted to XML, stored, and returned
+by ``collect_assets()`` -- so analyses which ``need`` this one get the
+suppressed PSD, not BayesWave's raw output.
 
-   pipeline = BayesWave(production)
-   pipeline.supress_psd(ifo="H1", fmin=60.0, fmax=60.5)
+Containers
+~~~~~~~~~~
 
-This sets the PSD to 1.0 in the specified frequency range.
+Set ``scheduler: container:`` to an image to run BayesWave's jobs in it; it
+is passed to ``bayeswave_pipe`` as ``[engine] singularity``.
 
 Advanced Features
 -----------------
