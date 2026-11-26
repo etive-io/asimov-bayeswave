@@ -165,19 +165,22 @@ class BayesWave(Pipeline):
             except AsimovFileNotFound:
                 if "event time" in self.production.meta:
                     gps_time = self.production.get_meta("event time")
-                    with set_directory(
-                        os.path.join(
-                            self.production.event.repository.directory, self.category
-                        )
-                    ):
-                        with open("gpstime.txt", "w") as f:
-                            f.write(str(gps_time))
-                            gps_file = os.path.join(
-                                f"{self.production.category}", "gpstime.txt"
-                            )
-                            self.production.event.repository.add_file(
-                                "gpstime.txt", gps_file
-                            )
+                    # Write the file by path and call add_file() from the
+                    # current directory: asimov >= 0.8 opens the event
+                    # repository lazily from its (relative) directory, so
+                    # repository calls made inside set_directory() resolve
+                    # it against the wrong place.
+                    gps_dir = os.path.join(
+                        self.production.event.repository.directory, self.category
+                    )
+                    os.makedirs(gps_dir, exist_ok=True)
+                    gps_path = os.path.join(gps_dir, "gpstime.txt")
+                    with open(gps_path, "w") as f:
+                        f.write(str(gps_time))
+                    gps_file = os.path.join(
+                        f"{self.production.category}", "gpstime.txt"
+                    )
+                    self.production.event.repository.add_file(gps_path, gps_file)
                 else:
                     raise PipelineException("Cannot find the event time.")
         else:

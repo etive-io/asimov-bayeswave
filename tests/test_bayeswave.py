@@ -158,6 +158,45 @@ class TestBuildDag:
 
     @patch("asimov_bayeswave.bayeswave.shutil.which")
     @patch("asimov_bayeswave.bayeswave.subprocess.Popen")
+    def test_gps_time_file_added_without_changing_directory(
+        self, mock_popen, mock_which, mock_production, mock_config, temp_dir
+    ):
+        """
+        With no time file in the repository, build_dag() writes gpstime.txt and
+        adds it. asimov >= 0.8 opens the event repository lazily from its
+        relative directory, so add_file() must be called from the project
+        directory, not from inside the repository (which doubled the path).
+        """
+        from asimov.git import AsimovFileNotFound
+
+        mock_which.return_value = "/opt/conda/bin/bayeswave_pipe"
+        process = Mock()
+        process.communicate.return_value = (b"To submit: condor_submit", b"")
+        mock_popen.return_value = process
+        mock_production.get_timefile.side_effect = AsimovFileNotFound("no time file")
+        mock_ini = MagicMock()
+        mock_ini._get_user = Mock(return_value="test.user")
+        mock_ini.ini_loc = "/tmp/test.ini"
+        mock_production.get_configuration.return_value = mock_ini
+        mock_production.event.repository.directory = os.path.join(temp_dir, "repo")
+        mock_production.rundir = os.path.join(temp_dir, "run")
+        calls = []
+        mock_production.event.repository.add_file.side_effect = (
+            lambda source, destination, **kw: calls.append(
+                (source, destination, os.getcwd())
+            )
+        )
+        start = os.getcwd()
+
+        BayesWave(mock_production).build_dag(user="test.user", dryrun=False)
+
+        source, destination, cwd = calls[0]
+        assert cwd == start
+        assert destination == os.path.join("analyses", "gpstime.txt")
+        assert open(source).read() == str(mock_production.meta["event time"])
+
+    @patch("asimov_bayeswave.bayeswave.shutil.which")
+    @patch("asimov_bayeswave.bayeswave.subprocess.Popen")
     def test_build_dag_failure(
         self, mock_popen, mock_which, mock_production, mock_config
     ):
