@@ -265,15 +265,25 @@ jobs:
         with:
           script: |
             cd e2e_project
+            # Through asimov's API rather than reading .asimov/ledger.yml, so
+            # it works with either ledger engine (asimov 0.8 defaults to SQLite).
             python3 -c "
-            import yaml
-            with open('.asimov/ledger.yml') as f:
-                ledger = yaml.safe_load(f)
-            event = next(e for e in ledger['events'] if e['name'] == 'FAKE_BAYESWAVE_TEST_EVENT')
-            production = next(p['generate-psd'] for p in event['productions'] if 'generate-psd' in p)
-            status = production.get('status')
+            import os
+            from asimov import current_ledger as ledger
+            event = ledger.get_event('FAKE_BAYESWAVE_TEST_EVENT')[0]
+            production = next(p for p in event.productions if p.name == 'generate-psd')
+            status = str(production.status).lower()
             print('generate-psd status:', status)
             assert status in ('finished', 'uploaded'), f'Unexpected status: {status}'
+            # The PSDs handed to later analyses must be the final ones
+            # (committed to the event repository, or in asimov-psds/), not
+            # BayesWave's raw output from the run directory.
+            psds = production.pipeline.collect_assets()['psds']
+            print('PSDs handed on:', psds)
+            assert psds, 'no PSDs collected'
+            for ifo, path in psds.items():
+                assert os.path.exists(path), f'{ifo}: {path} does not exist'
+                assert 'glitch_median_PSD_forLI' not in path, f'{ifo}: raw BayesWave PSD handed on: {path}'
             "
 
       # after_completion()'s PSD->XML conversion step calls
