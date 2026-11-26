@@ -456,7 +456,10 @@ class TestSupressPsd:
     def test_single_band(self, mock_production, mock_config, temp_dir):
         pipeline = BayesWave(mock_production)
         out = pipeline.supress_psd(
-            "H1", {"lower": 60.0, "upper": 60.5}, self._psd(temp_dir), os.path.join(temp_dir, "out.dat")
+            "H1",
+            {"lower": 60.0, "upper": 60.5},
+            self._psd(temp_dir),
+            os.path.join(temp_dir, "out.dat"),
         )
         data = np.genfromtxt(out)
         band = (data[:, 0] >= 60.0) & (data[:, 0] <= 60.5)
@@ -481,7 +484,10 @@ class TestSupressPsd:
     def test_values_keep_full_precision(self, mock_production, mock_config, temp_dir):
         pipeline = BayesWave(mock_production)
         out = pipeline.supress_psd(
-            "H1", [], self._psd(temp_dir, value=1.234567891234e-23), os.path.join(temp_dir, "out.dat")
+            "H1",
+            [],
+            self._psd(temp_dir, value=1.234567891234e-23),
+            os.path.join(temp_dir, "out.dat"),
         )
         assert np.genfromtxt(out)[0, 1] == 1.234567891234e-23
 
@@ -494,20 +500,27 @@ class TestFinalPsds:
 
     def _setup(self, mock_production, temp_dir, suppress=None):
         mock_production.rundir = os.path.join(temp_dir, "run")
-        clean = os.path.join(mock_production.rundir, "trigtime_1126259462", "post", "clean")
+        clean = os.path.join(
+            mock_production.rundir, "trigtime_1126259462", "post", "clean"
+        )
         os.makedirs(clean)
         freq = np.linspace(10, 100, 181)
         for ifo in ("H1", "L1"):
-            np.savetxt(os.path.join(clean, f"glitch_median_PSD_forLI_{ifo}.dat"),
-                       np.column_stack((freq, np.full_like(freq, 1e-23))))
+            np.savetxt(
+                os.path.join(clean, f"glitch_median_PSD_forLI_{ifo}.dat"),
+                np.column_stack((freq, np.full_like(freq, 1e-23))),
+            )
         if suppress:
             mock_production.meta["quality"] = {"supress": suppress}
         mock_production.event.repository.directory = os.path.join(temp_dir, "repo")
         return BayesWave(mock_production)
 
-    def test_suppressed_psd_is_the_one_collected(self, mock_production, mock_config, temp_dir):
-        pipeline = self._setup(mock_production, temp_dir,
-                               suppress={"H1": [{"lower": 59.5, "upper": 60.5}]})
+    def test_suppressed_psd_is_the_one_collected(
+        self, mock_production, mock_config, temp_dir
+    ):
+        pipeline = self._setup(
+            mock_production, temp_dir, suppress={"H1": [{"lower": 59.5, "upper": 60.5}]}
+        )
         final = pipeline.finalise_psds()
         assets = pipeline.collect_assets()["psds"]
         assert assets["H1"] == os.path.abspath(final["H1"])
@@ -516,10 +529,16 @@ class TestFinalPsds:
         l1 = np.genfromtxt(assets["L1"])
         assert not np.any(l1[:, 1] == 1.0)
 
-    def test_final_psds_are_committed_to_the_repository(self, mock_production, mock_config, temp_dir):
-        pipeline = self._setup(mock_production, temp_dir, suppress={"H1": {"lower": 59.5, "upper": 60.5}})
+    def test_final_psds_are_committed_to_the_repository(
+        self, mock_production, mock_config, temp_dir
+    ):
+        pipeline = self._setup(
+            mock_production, temp_dir, suppress={"H1": {"lower": 59.5, "upper": 60.5}}
+        )
         pipeline.finalise_psds()
-        destinations = [c.args[1] for c in mock_production.event.repository.add_file.call_args_list]
+        destinations = [
+            c.args[1] for c in mock_production.event.repository.add_file.call_args_list
+        ]
         assert destinations == [
             os.path.join("analyses", "psds", "2048", "H1-psd.dat"),
             os.path.join("analyses", "psds", "2048", "L1-psd.dat"),
@@ -528,32 +547,51 @@ class TestFinalPsds:
     def test_repository_psd_is_preferred(self, mock_production, mock_config, temp_dir):
         pipeline = self._setup(mock_production, temp_dir)
         pipeline.finalise_psds()
-        repo_psd = os.path.join(temp_dir, "repo", "analyses", "psds", "2048", "H1-psd.dat")
+        repo_psd = os.path.join(
+            temp_dir, "repo", "analyses", "psds", "2048", "H1-psd.dat"
+        )
         os.makedirs(os.path.dirname(repo_psd))
         open(repo_psd, "w").write("10 1\n")
         assert pipeline.collect_assets()["psds"]["H1"] == os.path.abspath(repo_psd)
 
-    def test_completion_ignores_psds_from_other_runs(self, mock_production, mock_config, temp_dir):
+    def test_completion_ignores_psds_from_other_runs(
+        self, mock_production, mock_config, temp_dir
+    ):
         # A PSD in the event repository from an earlier BayesWave run must not
         # make a new run look complete.
         mock_production.rundir = os.path.join(temp_dir, "new-run")
         mock_production.event.repository.directory = os.path.join(temp_dir, "repo")
-        repo_psd = os.path.join(temp_dir, "repo", "analyses", "psds", "2048", "H1-psd.dat")
+        repo_psd = os.path.join(
+            temp_dir, "repo", "analyses", "psds", "2048", "H1-psd.dat"
+        )
         os.makedirs(os.path.dirname(repo_psd))
         open(repo_psd, "w").write("10 1\n")
         pipeline = BayesWave(mock_production)
         assert pipeline.collect_assets()["psds"]  # the repository PSD is found ...
         assert pipeline.detect_completion() is False  # ... but isn't completion
 
-    @patch("asimov_bayeswave.bayeswave.shutil.which", return_value="/usr/bin/convert_psd_ascii2xml")
+    @patch(
+        "asimov_bayeswave.bayeswave.shutil.which",
+        return_value="/usr/bin/convert_psd_ascii2xml",
+    )
     @patch("asimov_bayeswave.bayeswave.BayesWave._convert_psd")
     @patch("asimov_bayeswave.bayeswave.BayesWave.collect_pages")
     @patch("asimov_bayeswave.bayeswave.BayesWave.store_assets")
     @patch("asimov_bayeswave.bayeswave.BayesWave.store_reconstructions")
     def test_after_completion_converts_the_suppressed_psd(
-        self, _recon, _store, _pages, mock_convert, _which, mock_production, mock_config, temp_dir
+        self,
+        _recon,
+        _store,
+        _pages,
+        mock_convert,
+        _which,
+        mock_production,
+        mock_config,
+        temp_dir,
     ):
-        pipeline = self._setup(mock_production, temp_dir, suppress={"H1": {"lower": 59.5, "upper": 60.5}})
+        pipeline = self._setup(
+            mock_production, temp_dir, suppress={"H1": {"lower": 59.5, "upper": 60.5}}
+        )
         pipeline.after_completion()
         final_h1 = os.path.join(mock_production.rundir, "asimov-psds", "H1-psd.dat")
         mock_convert.assert_any_call(ascii_format=final_h1, ifo="H1")

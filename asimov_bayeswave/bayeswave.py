@@ -1205,7 +1205,9 @@ class BayesWave(Pipeline):
         psd = data[:, 1].copy()
         for band in ranges:
             fmin, fmax = float(band["lower"]), float(band["upper"])
-            region = np.logical_and(np.greater_equal(freq, fmin), np.less_equal(freq, fmax))
+            region = np.logical_and(
+                np.greater_equal(freq, fmin), np.less_equal(freq, fmax)
+            )
             psd[region] = 1.0
             self.logger.info(f"{ifo} PSD suppressed between {fmin} Hz and {fmax} Hz")
         os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
@@ -1286,7 +1288,9 @@ class BayesWave(Pipeline):
                     commit_message=f"Added the {'suppressed ' if ifo in spec else ''}PSD for {ifo}.",
                 )
             except Exception as e:
-                self.logger.error(f"The PSD for {ifo} could not be committed to the repository")
+                self.logger.error(
+                    f"The PSD for {ifo} could not be committed to the repository"
+                )
                 self.logger.exception(e)
         return final
 
